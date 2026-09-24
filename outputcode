@@ -1,0 +1,900 @@
+# ==============================================================================
+# CAV MULTI-STATE ANALYSIS: REPORTING TABLES AND FIGURES
+# ==============================================================================
+# Produces SAP Tables 3, 4, 6 and 7, model-derived tables, a publication-ready
+# Sahlgrenska prevalence figure, and one Excel workbook for SAS reporting.
+#
+# State coding assumed:
+#   1 = CAV 0, 2 = CAV 1, 3 = CAV >=2, 4 = Death, 99 = alive/CAV unknown.
+#
+# Assumes the final long data already contain the annual age-update rows and
+# the artificial cut-point row where required.
+#
+# No event-count or event-rate columns are produced for the multi-state model.
+# ============================================================================
+
+# ==============================================================================
+# 0. PACKAGES / OPTIONS / OUTPUT DIRECTORY
+# ==============================================================================
+
+library(msm)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(generics)
+library(openxlsx)
+library(tableone)
+library(lubridate)
+
+options(scipen = 999)
+
+RUN_DATE <- format(Sys.Date(), "%Y%m%d")
+OUT_DIR <- file.path(getwd(), paste0("CAV_reporting_", RUN_DATE))
+if (!dir.exists(OUT_DIR)) dir.create(OUT_DIR, recursive = TRUE)
+
+PLOT_FONT <- "sans"   # change to "Aptos" if available
+B_CI <- 1000
+
+# ==============================================================================
+# 1. ANALYSIS OBJECTS / CONSTANTS
+# ==============================================================================
+
+# Change these object names if needed.
+dat <- test18_pw
+cens <- cens_time       # expected columns: lopnr, obs_yrs
+
+stopifnot(exists("Q"), exists("ematrix"))
+
+CUT_YEARS <- 21 / 365.25
+SAHL_LEVEL <- "Göteborg"
+
+if (!is.factor(dat$sex)) dat$sex <- factor(dat$sex)
+if (!is.factor(dat$unit)) dat$unit <- factor(dat$unit)
+if (!is.factor(dat$tx_era)) dat$tx_era <- factor(dat$tx_era)
+
+dat <- dat %>%
+  mutate(
+    post_cut = factor(
+      if_else(years < CUT_YEARS, "Early", "After"),
+      levels = c("After", "Early")
+    )
+  ) %>%
+  arrange(lopnr, years)
+
+state_labels <- c(
+  "1" = "CAV 0",
+  "2" = "CAV 1",
+  "3" = "CAV >=2",
+  "4" = "Death"
+)
+
+# ==============================================================================
+# 2. FIT FINAL ADJUSTED AND UNADJUSTED MODELS
+# ==============================================================================
+
+# Adjusted model: post_cut acts only on transition 1 -> 4.
+fit_adj <- msm(
+  state ~ years,
+  subject = lopnr,
+  data = dat,
+  qmatrix = Q,
+  ematrix = ematrix,
+  deathexact = 4,
+  obstrue = firstobs,
+  covariates = list(
+    "1-2" = ~ sex + age + unit + tx_era,
+    "1-4" = ~ sex + age + unit + tx_era + post_cut,
+    "2-3" = ~ sex + age + unit + tx_era,
+    "2-4" = ~ sex + age + unit + tx_era,
+    "3-4" = ~ sex + age + unit + tx_era
+  ),
+  constraint = list(
+    sexFemale = c(1, 2, 3, 2, 2),
+    age = c(1, 2, 3, 2, 2),
+    unitLund = c(1, 2, 1, 2, 2),
+    unitStockholm = c(1, 2, 1, 2, 2),
+    `tx_era2008-2015` = c(1, 2, 1, 2, 2),
+    `tx_era2016-2024` = c(1, 2, 1, 2, 2)
+  ),
+  method = "BFGS",
+  censor = 99,
+  censor.states = 1:3
+)
+
+# Unadjusted model: no patient covariates, but retain the structural early
+# mortality effect so the q_ij comparison uses the same time structure.
+fit_unadj <- msm(
+  state ~ years,
+  subject = lopnr,
+  data = dat,
+  qmatrix = Q,
+  ematrix = ematrix,
+  deathexact = 4,
+  obstrue = firstobs,
+  covariates = list("1-4" = ~ post_cut),
+  method = "BFGS",
+  censor = 99,
+  censor.states = 1:3
+)
+
+# ==============================================================================
+# 3. HELPERS / REPRESENTATIVE COVARIATE PROFILE
+# ==============================================================================
+
+mode1 <- function(x) {
+  x <- x[!is.na(x)]
+  names(which.max(table(x)))
+}
+
+baseline_df <- dat %>%
+  arrange(lopnr, years) %>%
+  group_by(lopnr) %>%
+  slice_head(n = 1) %>%
+  ungroup()
+
+# Continuous covariate: mean. Nominal categorical covariates: modal category.
+age_ref <- mean(baseline_df$age, na.rm = TRUE)
+sex_ref <- mode1(baseline_df$sex)
+unit_ref <- mode1(baseline_df$unit)
+era_ref <- mode1(baseline_df$tx_era)
+
+# Convert readable factor levels to the dummy-variable names expected by msm.
+make_covlist <- function(age_value,
+                         sex_value = sex_ref,
+                         unit_value = unit_ref,
+                         era_value = era_ref,
+                         period_value = "After") {
+  nd <- data.frame(
+    sex = factor(sex_value, levels = levels(dat$sex)),
+    age = age_value,
+    unit = factor(unit_value, levels = levels(dat$unit)),
+    tx_era = factor(era_value, levels = levels(dat$tx_era)),
+    post_cut = factor(period_value, levels = levels(dat$post_cut))
+  )
+  mm <- model.matrix(~ sex + age + unit + tx_era + post_cut, data = nd)
+  vals <- as.numeric(mm[1, -1, drop = TRUE])
+  names(vals) <- colnames(mm)[-1]
+  as.list(vals)
+}
+
+make_postcut_covlist <- function(period_value = "After") {
+  nd <- data.frame(
+    post_cut = factor(period_value, levels = levels(dat$post_cut))
+  )
+  mm <- model.matrix(~ post_cut, data = nd)
+  vals <- as.numeric(mm[1, -1, drop = TRUE])
+  names(vals) <- colnames(mm)[-1]
+  as.list(vals)
+}
+
+ref_after <- make_covlist(age_ref, period_value = "After")
+ref_early <- make_covlist(age_ref, period_value = "Early")
+ref_after_unadj <- make_postcut_covlist("After")
+ref_early_unadj <- make_postcut_covlist("Early")
+
+# Piecewise profile: age updated yearly; post_cut changes at 21 days.
+make_piecewise_profile <- function(tmax,
+                                   age0 = age_ref,
+                                   sex0 = sex_ref,
+                                   unit0 = unit_ref,
+                                   era0 = era_ref) {
+  annual_cuts <- seq_len(floor(tmax))
+  annual_cuts <- annual_cuts[annual_cuts < tmax]
+  cuts <- sort(unique(c(CUT_YEARS, annual_cuts)))
+  cuts <- cuts[cuts > 0 & cuts < tmax]
+  starts <- c(0, cuts)
+
+  covs <- lapply(starts, function(t) {
+    make_covlist(
+      age_value = age0 + t,
+      sex_value = sex0,
+      unit_value = unit0,
+      era_value = era0,
+      period_value = ifelse(t < CUT_YEARS, "Early", "After")
+    )
+  })
+
+  list(times = cuts, covariates = covs)
+}
+
+label_msm_matrix <- function(x) {
+  x %>%
+    mutate(
+      from_state = state_labels[as.character(state)],
+      to_state = state_labels[as.character(tostate)],
+      transition = paste0(from_state, " -> ", to_state)
+    )
+}
+
+# ==============================================================================
+# 4. TRANSITION INTENSITIES / HR TABLE
+# ==============================================================================
+
+extract_q <- function(fit, covs, model_label, period_label) {
+  qmatrix.msm(fit, covariates = covs, ci = "delta") %>%
+    generics::tidy() %>%
+    filter(state != tostate) %>%
+    label_msm_matrix() %>%
+    mutate(model = model_label, period = period_label)
+}
+
+q_unadj_after <- extract_q(fit_unadj, ref_after_unadj, "Unadjusted", "After cut")
+q_adj_after <- extract_q(fit_adj, ref_after, "Adjusted", "After cut")
+
+q_unadj_early <- extract_q(fit_unadj, ref_early_unadj, "Unadjusted", "Early") %>%
+  filter(state == 1, tostate == 4)
+q_adj_early <- extract_q(fit_adj, ref_early, "Adjusted", "Early") %>%
+  filter(state == 1, tostate == 4)
+
+transition_intensities <- q_unadj_after %>%
+  select(
+    state, tostate, transition,
+    q_unadjusted = estimate,
+    q_unadjusted_LCL = conf.low,
+    q_unadjusted_UCL = conf.high
+  ) %>%
+  left_join(
+    q_adj_after %>%
+      select(
+        state, tostate,
+        q_adjusted = estimate,
+        q_adjusted_LCL = conf.low,
+        q_adjusted_UCL = conf.high
+      ),
+    by = c("state", "tostate")
+  )
+
+q14_early_after <- bind_rows(
+  q_unadj_early,
+  q_unadj_after %>% filter(state == 1, tostate == 4),
+  q_adj_early,
+  q_adj_after %>% filter(state == 1, tostate == 4)
+) %>%
+  select(model, period, transition, estimate, std.error, conf.low, conf.high)
+
+# Adjusted covariate effects, CIs and Wald p-values.
+covariate_HRs <- generics::tidy(fit_adj) %>%
+  filter(parclass == "hr") %>%
+  label_msm_matrix() %>%
+  transmute(
+    transition,
+    covariate = term,
+    HR = estimate,
+    LCL = conf.low,
+    UCL = conf.high,
+    p_value = p.value
+  )
+
+model_fit_stats <- tibble(
+  model = c("Unadjusted", "Adjusted"),
+  minus2loglik = c(fit_unadj$minus2loglik, fit_adj$minus2loglik)
+)
+
+# ==============================================================================
+# 5. MISCLASSIFICATION MATRIX
+# ==============================================================================
+
+misclassification <- ematrix.msm(fit_adj, ci = "delta") %>%
+  generics::tidy() %>%
+  mutate(
+    true_state = state_labels[as.character(state)],
+    observed_state = state_labels[as.character(tostate)]
+  ) %>%
+  select(true_state, observed_state, estimate, std.error, conf.low, conf.high)
+
+# ==============================================================================
+# 6. SAHLGRENSKA OBSERVED VS MODELLED PREVALENCE FIGURE
+# ==============================================================================
+
+mf <- model.frame(fit_adj)
+model_ids <- unique(mf[["(subject)"]])
+
+sahl_ids <- model_ids[
+  model_ids %in% unique(dat$lopnr[dat$unit == SAHL_LEVEL])
+]
+
+cen_sahl <- cens$obs_yrs[match(sahl_ids, cens$lopnr)]
+stopifnot(!anyNA(cen_sahl))
+
+# Population-standardised expected prevalence among the same Sahlgrenska IDs.
+prev_sahl <- prevalence.msm(
+  fit_adj,
+  times = seq(0, 7, by = 0.05),
+  subset = sahl_ids,
+  covariates = "population",
+  censtime = cen_sahl,
+  interp = "start",
+  ci = "none"
+)
+
+prev_sahl_df <- generics::tidy(prev_sahl) %>%
+  filter(output == "percentage") %>%
+  mutate(state_name = state_labels[as.character(state)])
+
+prev_sahl_long <- prev_sahl_df %>%
+  select(time, state_name, observed, expected) %>%
+  pivot_longer(
+    cols = c(observed, expected),
+    names_to = "series",
+    values_to = "prevalence"
+  ) %>%
+  mutate(
+    series = factor(
+      series,
+      levels = c("observed", "expected"),
+      labels = c("Observed", "Modelled")
+    ),
+    state_name = factor(
+      state_name,
+      levels = c("CAV 0", "CAV 1", "CAV >=2", "Death")
+    )
+  )
+
+p_prev_sahl <- ggplot(
+  prev_sahl_long,
+  aes(x = time, y = prevalence, colour = series, linetype = series)
+) +
+  geom_line(linewidth = 0.9) +
+  facet_wrap(~ state_name, ncol = 2) +
+  scale_x_continuous(
+    breaks = 0:7,
+    limits = c(0, 7),
+    expand = expansion(mult = c(0, 0.01))
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, 100, 20),
+    limits = c(0, 100),
+    expand = expansion(mult = c(0, 0.02))
+  ) +
+  scale_colour_manual(values = c("Observed" = "#1F4E79", "Modelled" = "#A23B3B")) +
+  scale_linetype_manual(values = c("Observed" = "solid", "Modelled" = "dashed")) +
+  labs(
+    x = "Years after heart transplantation",
+    y = "Prevalence (%)",
+    colour = NULL,
+    linetype = NULL
+  ) +
+  theme_minimal(base_size = 11, base_family = PLOT_FONT) +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(linewidth = 0.25, colour = "grey85"),
+    panel.border = element_rect(fill = NA, colour = "grey35", linewidth = 0.5),
+    strip.text = element_text(face = "bold", size = 11),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 10),
+    legend.position = "bottom"
+  )
+
+ggsave(
+  file.path(OUT_DIR, paste0("Figure_prevalence_Sahlgrenska_", RUN_DATE, ".pdf")),
+  p_prev_sahl,
+  width = 9,
+  height = 7,
+  device = cairo_pdf
+)
+
+ggsave(
+  file.path(OUT_DIR, paste0("Figure_prevalence_Sahlgrenska_", RUN_DATE, ".png")),
+  p_prev_sahl,
+  width = 9,
+  height = 7,
+  dpi = 600,
+  bg = "white"
+)
+
+# ==============================================================================
+# 7. OBSERVED / EXPECTED PREVALENCE AT YEARS 1, 3 AND 6
+# ==============================================================================
+
+cen_all <- cens$obs_yrs[match(model_ids, cens$lopnr)]
+stopifnot(!anyNA(cen_all))
+
+pw6 <- make_piecewise_profile(6)
+
+prev_136 <- prevalence.msm(
+  fit_adj,
+  times = c(1, 3, 6),
+  censtime = cen_all,
+  piecewise.times = pw6$times,
+  piecewise.covariates = pw6$covariates,
+  interp = "start",
+  ci = "none"
+)
+
+prevalence_136 <- generics::tidy(prev_136) %>%
+  filter(output == "percentage") %>%
+  mutate(state_name = state_labels[as.character(state)]) %>%
+  select(time, state, state_name, observed, expected)
+
+# ==============================================================================
+# 8. TRANSITION PROBABILITY MATRICES AT YEARS 1, 3 AND 6
+# ==============================================================================
+
+get_P <- function(t) {
+  pw <- make_piecewise_profile(t)
+
+  pmatrix.piecewise.msm(
+    fit_adj,
+    t1 = 0,
+    t2 = t,
+    times = pw$times,
+    covariates = pw$covariates,
+    ci = "normal",
+    B = B_CI
+  ) %>%
+    generics::tidy() %>%
+    label_msm_matrix() %>%
+    mutate(year = t)
+}
+
+P_136 <- map_dfr(c(1, 3, 6), get_P) %>%
+  select(
+    year, state, tostate, from_state, to_state,
+    estimate, std.error, conf.low, conf.high
+  )
+
+P_136_from_CAV0 <- P_136 %>% filter(state == 1)
+
+# ==============================================================================
+# 9. EXPECTED LENGTH OF STAY IN EACH STATE DURING YEARS 0-7
+# ==============================================================================
+
+pw7 <- make_piecewise_profile(7)
+
+los_0_7 <- totlos.msm(
+  fit_adj,
+  start = 1,
+  fromt = 0,
+  tot = 7,
+  piecewise.times = pw7$times,
+  piecewise.covariates = pw7$covariates,
+  ci = "normal",
+  B = B_CI
+) %>%
+  generics::tidy() %>%
+  mutate(state_name = state_labels[as.character(state)]) %>%
+  select(state, state_name, estimate, conf.low, conf.high)
+
+# ==============================================================================
+# 10. PROBABILITY THAT EACH STATE IS NEXT
+# ==============================================================================
+
+# pnext.msm evaluates one fixed Q, so show both early and post-cut profiles.
+pnext_early <- pnext.msm(
+  fit_adj,
+  covariates = ref_early,
+  ci = "normal",
+  B = B_CI
+) %>%
+  generics::tidy() %>%
+  label_msm_matrix() %>%
+  mutate(period = "Early")
+
+pnext_after <- pnext.msm(
+  fit_adj,
+  covariates = ref_after,
+  ci = "normal",
+  B = B_CI
+) %>%
+  generics::tidy() %>%
+  label_msm_matrix() %>%
+  mutate(period = "After cut")
+
+pnext_table <- bind_rows(pnext_early, pnext_after) %>%
+  select(
+    period, state, tostate, from_state, to_state,
+    estimate, std.error, conf.low, conf.high
+  )
+
+# ==============================================================================
+# 11. PASSAGE PROBABILITIES BY YEAR 7
+# ==============================================================================
+
+# Probability of having visited each state at least once by year 7.
+passage_7 <- ppass.msm(
+  fit_adj,
+  tot = 7,
+  start = 1,
+  piecewise.times = pw7$times,
+  piecewise.covariates = pw7$covariates,
+  ci = "normal",
+  B = B_CI
+) %>%
+  generics::tidy() %>%
+  label_msm_matrix() %>%
+  select(
+    state, tostate, from_state, to_state,
+    estimate, std.error, conf.low, conf.high
+  )
+
+# ==============================================================================
+# 12. RATIOS OF TRANSITION INTENSITIES
+# ==============================================================================
+
+get_qratio <- function(ind1, ind2, covs, comparison, period) {
+  z <- qratio.msm(
+    fit_adj,
+    ind1 = ind1,
+    ind2 = ind2,
+    covariates = covs,
+    ci = "delta"
+  )
+
+  tibble(
+    comparison = comparison,
+    period = period,
+    ratio = unname(z["estimate"]),
+    SE = unname(z["se"]),
+    LCL = unname(z["L"]),
+    UCL = unname(z["U"])
+  )
+}
+
+intensity_ratios <- bind_rows(
+  get_qratio(
+    c(1, 2), c(1, 4), ref_early,
+    "q12 / q14: CAV progression vs death from CAV 0",
+    "Early"
+  ),
+  get_qratio(
+    c(1, 2), c(1, 4), ref_after,
+    "q12 / q14: CAV progression vs death from CAV 0",
+    "After cut"
+  ),
+  get_qratio(
+    c(2, 3), c(2, 4), ref_after,
+    "q23 / q24: CAV progression vs death from CAV 1",
+    "After cut"
+  )
+)
+
+# ==============================================================================
+# 13. SAP TABLE 3: STUDY POPULATION
+# ==============================================================================
+
+patient_df <- dat %>%
+  arrange(lopnr, years) %>%
+  group_by(lopnr) %>%
+  summarise(
+    surgery_date_1 = first(surgery_date_1[!is.na(surgery_date_1)]),
+    surgery_date_2 = first(surgery_date_2[!is.na(surgery_date_2)]),
+    age_htx = first(age_at_surgery_1[!is.na(age_at_surgery_1)]),
+    sex = first(sex[!is.na(sex)]),
+    BMI = first(BMI_at_surgery_1[!is.na(BMI_at_surgery_1)]),
+    unit = first(unit[!is.na(unit)]),
+    tx_era = first(tx_era[!is.na(tx_era)]),
+    followup_years = max(years, na.rm = TRUE),
+    death = any(state == 4),
+    had_angio = any(years > 0 & state %in% 1:3),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    htx_year = year(surgery_date_1),
+    retx = !is.na(surgery_date_2)
+  )
+
+fmt_med_iqr <- function(x, digits = 1) {
+  q <- quantile(x, c(0.25, 0.50, 0.75), na.rm = TRUE)
+  sprintf(
+    paste0("%.", digits, "f (%.", digits, "f; %.", digits, "f)"),
+    q[2], q[1], q[3]
+  )
+}
+
+fmt_med_iqr_range <- function(x, digits = 1) {
+  q <- quantile(x, c(0.25, 0.50, 0.75), na.rm = TRUE)
+  sprintf(
+    paste0(
+      "%.", digits, "f (%.", digits, "f; %.", digits,
+      "f), range %.", digits, "f-%.", digits, "f"
+    ),
+    q[2], q[1], q[3], min(x, na.rm = TRUE), max(x, na.rm = TRUE)
+  )
+}
+
+fmt_mean_sd <- function(x, digits = 1) {
+  sprintf(
+    paste0("%.", digits, "f (%.", digits, "f)"),
+    mean(x, na.rm = TRUE), sd(x, na.rm = TRUE)
+  )
+}
+
+fmt_n_pct <- function(n, N, digits = 1) {
+  sprintf(
+    paste0("%d/%d (%.", digits, "f%%)"),
+    n, N, 100 * n / N
+  )
+}
+
+N_pat <- nrow(patient_df)
+
+table3_main <- tibble(
+  Variable = c(
+    "Patients with angiography, n/N (%)",
+    "HTx year, median (IQR; range)",
+    "Age at HTx, mean (SD)",
+    "Age at HTx, median (IQR)",
+    "Follow-up, median (IQR), years",
+    "Deaths during follow-up, n/N (%)",
+    "Re-transplantation during follow-up, n/N (%)"
+  ),
+  Value = c(
+    fmt_n_pct(sum(patient_df$had_angio), N_pat),
+    fmt_med_iqr_range(patient_df$htx_year, 0),
+    fmt_mean_sd(patient_df$age_htx),
+    fmt_med_iqr(patient_df$age_htx),
+    fmt_med_iqr(patient_df$followup_years),
+    fmt_n_pct(sum(patient_df$death), N_pat),
+    fmt_n_pct(sum(patient_df$retx), N_pat)
+  )
+)
+
+table3_sex <- patient_df %>%
+  filter(!is.na(sex)) %>%
+  count(sex) %>%
+  mutate(
+    N_nonmissing = sum(n),
+    Variable = paste0("Sex: ", sex, ", n/N (%)"),
+    Value = sprintf("%d/%d (%.1f%%)", n, N_nonmissing, 100 * n / N_nonmissing)
+  ) %>%
+  select(Variable, Value)
+
+table3 <- bind_rows(table3_main, table3_sex)
+
+# ==============================================================================
+# 14. SAP TABLE 4: CAV AT YEARS 1, 3 AND 6 WINDOWS
+# ==============================================================================
+
+windows <- tibble(
+  window = factor(
+    c("1 year", "3 years", "6 years"),
+    levels = c("1 year", "3 years", "6 years")
+  ),
+  lower = c(0.5, 2, 4),
+  upper = c(2, 4, 7),
+  target = c(1, 3, 6)
+)
+
+angio_window <- dat %>%
+  filter(state %in% 1:3) %>%
+  mutate(
+    window = case_when(
+      years >= 0.5 & years < 2 ~ "1 year",
+      years >= 2   & years < 4 ~ "3 years",
+      years >= 4   & years < 7 ~ "6 years",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(window)) %>%
+  left_join(
+    windows %>% mutate(window = as.character(window)) %>% select(window, target),
+    by = "window"
+  ) %>%
+  group_by(lopnr, window) %>%
+  arrange(desc(state), abs(years - target), .by_group = TRUE) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  transmute(
+    lopnr,
+    window = factor(window, levels = levels(windows$window)),
+    cav_grade = state - 1,
+    angio_year = years
+  )
+
+# Assumes the final modelling data are already censored appropriately at death,
+# re-transplantation, or administrative end of follow-up.
+eligible <- crossing(
+  lopnr = patient_df$lopnr,
+  window = windows$window
+) %>%
+  left_join(windows, by = "window") %>%
+  left_join(patient_df, by = "lopnr") %>%
+  filter(followup_years >= lower) %>%
+  left_join(angio_window, by = c("lopnr", "window")) %>%
+  mutate(conclusive_angio = !is.na(cav_grade))
+
+binom_ci <- function(x, n) {
+  if (n == 0) return(c(NA_real_, NA_real_))
+  binom.test(x, n)$conf.int
+}
+
+table4 <- eligible %>%
+  group_by(window) %>%
+  summarise(
+    eligible_n = n(),
+    angio_n = sum(conclusive_angio),
+    cav0_n = sum(cav_grade == 0, na.rm = TRUE),
+    cav_ge1_n = sum(cav_grade >= 1, na.rm = TRUE),
+    cav_ge2_n = sum(cav_grade >= 2, na.rm = TRUE),
+    median_angio_year = median(angio_year, na.rm = TRUE),
+    q1_angio_year = quantile(angio_year, 0.25, na.rm = TRUE),
+    q3_angio_year = quantile(angio_year, 0.75, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  rowwise() %>%
+  mutate(
+    cav0_pct = 100 * cav0_n / angio_n,
+    cav_ge1_pct = 100 * cav_ge1_n / angio_n,
+    cav_ge2_pct = 100 * cav_ge2_n / angio_n,
+    cav0_LCL = 100 * binom_ci(cav0_n, angio_n)[1],
+    cav0_UCL = 100 * binom_ci(cav0_n, angio_n)[2],
+    cav_ge1_LCL = 100 * binom_ci(cav_ge1_n, angio_n)[1],
+    cav_ge1_UCL = 100 * binom_ci(cav_ge1_n, angio_n)[2],
+    cav_ge2_LCL = 100 * binom_ci(cav_ge2_n, angio_n)[1],
+    cav_ge2_UCL = 100 * binom_ci(cav_ge2_n, angio_n)[2]
+  ) %>%
+  ungroup()
+
+# ==============================================================================
+# 15. SAP TABLE 6: ANGIOGRAPHY COVERAGE
+# ==============================================================================
+
+table6_total <- eligible %>%
+  group_by(window) %>%
+  summarise(
+    n = sum(conclusive_angio),
+    N = n(),
+    percent = 100 * n / N,
+    .groups = "drop"
+  ) %>%
+  mutate(stratum_type = "Overall", stratum = "Total")
+
+table6_era <- eligible %>%
+  group_by(tx_era, window) %>%
+  summarise(
+    n = sum(conclusive_angio),
+    N = n(),
+    percent = 100 * n / N,
+    .groups = "drop"
+  ) %>%
+  transmute(
+    stratum_type = "Transplantation era",
+    stratum = as.character(tx_era),
+    window, n, N, percent
+  )
+
+table6_unit <- eligible %>%
+  group_by(unit, window) %>%
+  summarise(
+    n = sum(conclusive_angio),
+    N = n(),
+    percent = 100 * n / N,
+    .groups = "drop"
+  ) %>%
+  transmute(
+    stratum_type = "Transplantation center",
+    stratum = as.character(unit),
+    window, n, N, percent
+  )
+
+table6 <- bind_rows(table6_total, table6_era, table6_unit) %>%
+  select(stratum_type, stratum, window, n, N, percent)
+
+# ==============================================================================
+# 16. SAP TABLE 7: WITH VS WITHOUT ANGIOGRAPHY, 0.5-<7 YEARS
+# ==============================================================================
+
+angio_status <- dat %>%
+  group_by(lopnr) %>%
+  summarise(
+    angio_05_7 = any(years >= 0.5 & years < 7 & state %in% 1:3),
+    .groups = "drop"
+  )
+
+table7_dat <- patient_df %>%
+  left_join(angio_status, by = "lopnr") %>%
+  filter(followup_years >= 0.5) %>%
+  mutate(
+    angio_05_7 = factor(
+      angio_05_7,
+      levels = c(FALSE, TRUE),
+      labels = c("No angiography", "With angiography")
+    )
+  )
+
+tab7_obj <- CreateTableOne(
+  vars = c("age_htx", "sex", "BMI", "tx_era", "unit"),
+  strata = "angio_05_7",
+  data = table7_dat,
+  factorVars = c("sex", "tx_era", "unit"),
+  test = TRUE
+)
+
+table7 <- print(
+  tab7_obj,
+  nonnormal = c("age_htx", "BMI"),
+  showAllLevels = TRUE,
+  smd = TRUE,
+  printToggle = FALSE,
+  noSpaces = TRUE
+) %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Variable")
+
+# ==============================================================================
+# 17. OPTIONAL: FROZEN-COVARIATE SOJOURN TIMES / EFPT
+# ==============================================================================
+# NOT primary results. These freeze Q at the representative post-cut profile.
+# sojourn.msm() does not support time-dependent covariates, and efpt.msm()
+# assumes time-homogeneity.
+
+sojourn_frozen_after <- sojourn.msm(
+  fit_adj,
+  covariates = ref_after,
+  ci = "delta"
+) %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("state_name")
+
+efpt_death_frozen_after <- efpt.msm(
+  fit_adj,
+  tostate = 4,
+  covariates = ref_after,
+  ci = "normal",
+  B = B_CI
+) %>%
+  generics::tidy() %>%
+  mutate(state_name = state_labels[as.character(state)])
+
+efpt_CAV1_frozen_after <- efpt.msm(
+  fit_adj,
+  tostate = 2,
+  covariates = ref_after,
+  ci = "normal",
+  B = B_CI
+) %>%
+  generics::tidy() %>%
+  mutate(state_name = state_labels[as.character(state)])
+
+efpt_CAV2_frozen_after <- efpt.msm(
+  fit_adj,
+  tostate = 3,
+  covariates = ref_after,
+  ci = "normal",
+  B = B_CI
+) %>%
+  generics::tidy() %>%
+  mutate(state_name = state_labels[as.character(state)])
+
+# ==============================================================================
+# 18. EXPORT ALL TABLES TO ONE EXCEL WORKBOOK FOR SAS
+# ==============================================================================
+
+xlsx_file <- file.path(
+  OUT_DIR,
+  paste0("CAV_results_for_SAS_", RUN_DATE, ".xlsx")
+)
+
+write.xlsx(
+  list(
+    Table3_population = table3,
+    Table4_CAV_windows = table4,
+    Table6_coverage = table6,
+    Table7_selection = table7,
+    Transition_intensities = transition_intensities,
+    Q14_early_after = q14_early_after,
+    Covariate_HRs = covariate_HRs,
+    Model_fit_stats = model_fit_stats,
+    Misclassification = misclassification,
+    Prevalence_1_3_6 = prevalence_136,
+    Pmatrix_1_3_6 = P_136,
+    Pmatrix_CAV0_1_3_6 = P_136_from_CAV0,
+    Length_of_stay_0_7 = los_0_7,
+    Next_state_probabilities = pnext_table,
+    Passage_probabilities_7y = passage_7,
+    Intensity_ratios = intensity_ratios,
+    Sojourn_frozen_after = sojourn_frozen_after,
+    EFPT_death_frozen_after = efpt_death_frozen_after,
+    EFPT_CAV1_frozen_after = efpt_CAV1_frozen_after,
+    EFPT_CAV2_frozen_after = efpt_CAV2_frozen_after
+  ),
+  file = xlsx_file,
+  overwrite = TRUE
+)
+
+message("Finished.")
+message("Output directory: ", OUT_DIR)
+message("Excel workbook: ", xlsx_file)
+message("Sahlgrenska prevalence figure saved as PDF and PNG.")
