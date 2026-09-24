@@ -284,23 +284,111 @@ misclassification <- ematrix.msm(fit_adj, ci = "delta") %>%
   select(true_state, observed_state, estimate, std.error, conf.low, conf.high)
 
 # ==============================================================================
-# 6. SAHLGRENSKA OBSERVED VS MODELLED PREVALENCE FIGURE
+# SAHLGRENSKA: OBSERVED VS MODELLED PREVALENCE WITH 95% CI
 # ==============================================================================
 
-mf <- model.frame(fit_adj)
-model_ids <- unique(mf[["(subject)"]])
+library(msm)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(ggh4x)
+library(parallel)
+library(scales)
 
+
+# ==============================================================================
+# 1. SETTINGS
+# ==============================================================================
+
+prev_times <- seq(0, 7, by = 0.05)
+
+# Number of simulations from the asymptotic distribution of the MLEs
+B <- 1000
+
+# Use several cores, but leave two free.
+# Increase 32 if the server has many cores and plenty of RAM.
+ncores <- min(
+  32L,
+  max(1L, parallel::detectCores() - 2L)
+)
+
+ncores
+
+state_labels <- c(
+  "1" = "CAV 0",
+  "2" = "CAV 1",
+  "3" = "CAV >=2",
+  "4" = "Death"
+)
+
+
+# ==============================================================================
+# 2. IDENTIFY SAHLGRENSKA PATIENTS
+# ==============================================================================
+
+# Sahlgrenska is the reference category for unit in fit_adj:
+# the level other than Lund and Stockholm.
+sahl_level <- setdiff(
+  levels(test18_pw$unit),
+  c("Lund", "Stockholm")
+)[1]
+
+sahl_level
+
+
+# Subject order actually used in fit_adj
+mf_adj <- model.frame(fit_adj)
+
+model_ids <- unique(
+  mf_adj[["(subject)"]]
+)
+
+
+# Sahlgrenska subjects, preserving the model subject order
 sahl_ids <- model_ids[
-  model_ids %in% unique(dat$lopnr[dat$unit == SAHL_LEVEL])
+  model_ids %in%
+    unique(
+      test18_pw$lopnr[
+        test18_pw$unit == sahl_level
+      ]
+    )
 ]
 
-cen_sahl <- cens$obs_yrs[match(sahl_ids, cens$lopnr)]
-stopifnot(!anyNA(cen_sahl))
+length(sahl_ids)
 
-# Population-standardised expected prevalence among the same Sahlgrenska IDs.
+
+# ==============================================================================
+# 3. SUBJECT-SPECIFIC CENSORING TIMES
+# ==============================================================================
+
+# Assumes your censoring data are:
+#   cens_df$lopnr
+#   cens_df$censtime
+#
+# If your object has another name, only change these two references.
+
+cen_sahl <- cens_df$censtime[
+  match(sahl_ids, cens_df$lopnr)
+]
+
+stopifnot(
+  length(cen_sahl) == length(sahl_ids),
+  !anyNA(cen_sahl)
+)
+
+
+# ==============================================================================
+# 4. POINT ESTIMATES OF OBSERVED AND MODELLED PREVALENCE
+# ==============================================================================
+
+# ci = "none" is deliberate.
+# We calculate the normal-simulation CI manually below so that subset=sahl_ids
+# is retained throughout the calculations.
+
 prev_sahl <- prevalence.msm(
   fit_adj,
-  times = seq(0, 7, by = 0.05),
+  times = prev_times,
   subset = sahl_ids,
   covariates = "population",
   censtime = cen_sahl,
@@ -308,76 +396,456 @@ prev_sahl <- prevalence.msm(
   ci = "none"
 )
 
-prev_sahl_df <- generics::tidy(prev_sahl) %>%
-  filter(output == "percentage") %>%
-  mutate(state_name = state_labels[as.character(state)])
 
-prev_sahl_long <- prev_sahl_df %>%
-  select(time, state_name, observed, expected) %>%
-  pivot_longer(
-    cols = c(observed, expected),
-    names_to = "series",
-    values_to = "prevalence"
-  ) %>%
+# Extract the two percentage matrices
+obs_pct <- prev_sahl[["Observed percentages"]]
+exp_pct <- prev_sahl[["Expected percentages"]]
+
+
+# ==============================================================================
+# 5. OBTAIN THE SAHLGRENSKA-SPECIFIC RISK MATRIX
+# ==============================================================================
+
+# observed.msm() constructs the same risk-set information used internally by
+# prevalence.msm(), now explicitly restricted to Sahlgrenska.
+
+obs_sahl <- msm:::observed.msm(
+  fit_adj,
+  times = prev_times,
+  interp = "start",
+  censtime = cen_sahl,
+  subset = sahl_ids
+)
+
+risk_sahl <- obs_sahl$risk
+
+
+# ==============================================================================
+# 6. NORMAL-SIMULATION CONFIDENCE INTERVALS IN PARALLEL
+# ==============================================================================
+
+# This is NOT a patient bootstrap.
+#
+# Each simulation draws a parameter vector from the asymptotic multivariate
+# normal distribution of the estimated model parameters and recalculates
+# expected prevalence.
+#
+# msm:::normboot.msm() itself is sequential, so we split the simulations
+# across several processes.
+
+# Divide B simulations approximately evenly across cores
+B_chunks <- rep(
+  B %/% ncores,
+  ncores
+)
+
+if (B %% ncores > 0) {
+  B_chunks[seq_len(B %% ncores)] <-
+    B_chunks[seq_len(B %% ncores)] + 1
+}
+
+# Remove any zero-size chunks
+B_chunks <- B_chunks[B_chunks > 0]
+
+B_chunks
+sum(B_chunks)
+
+
+# Reproducible independent random-number streams across forked workers
+RNGkind("L'Ecuyer-CMRG")
+set.seed(1234)
+
+
+prev_chunks <- parallel::mclapply(
+  B_chunks,
+
+  FUN = function(B_this) {
+
+    msm:::normboot.msm(
+      fit_adj,
+
+      stat = function(fit_sim) {
+
+        msm:::expected.msm(
+          fit_sim,
+          times = prev_times,
+          covariates = "population",
+          risk = risk_sahl,
+          subset = sahl_ids,
+          ci = "none"
+        )[["Expected percentages"]]
+
+      },
+
+      B = B_this
+    )
+  },
+
+  mc.cores = length(B_chunks),
+  mc.set.seed = TRUE,
+  mc.preschedule = TRUE
+)
+
+
+# Each worker returns a list of matrices.
+# Combine them into one list of B simulated prevalence matrices.
+prev_sim <- do.call(
+  c,
+  prev_chunks
+)
+
+stopifnot(
+  length(prev_sim) == B
+)
+
+
+# ==============================================================================
+# 7. CALCULATE 95% CONFIDENCE LIMITS
+# ==============================================================================
+
+nstates <- fit_adj$qmodel$nstates
+
+
+# Each element of prev_sim is:
+#
+#       time x state
+#
+# Stack them into:
+#
+#       time x state x simulation
+
+prev_array <- array(
+  unlist(
+    prev_sim,
+    use.names = FALSE
+  ),
+  dim = c(
+    length(prev_times),
+    nstates,
+    B
+  )
+)
+
+
+# Calculate 2.5th and 97.5th percentiles for every time/state combination.
+#
+# Result dimensions:
+#
+#       CI bound x time x state
+
+prev_ci <- apply(
+  prev_array,
+  MARGIN = c(1, 2),
+  FUN = quantile,
+  probs = c(0.025, 0.975),
+  na.rm = TRUE
+)
+
+
+# ==============================================================================
+# 8. CREATE CLEAN DATA FRAME FOR GGPLOT
+# ==============================================================================
+
+prev_sahl_df <- purrr::map_dfr(
+  seq_len(nstates),
+
+  function(s) {
+
+    tibble(
+      time = prev_times,
+
+      state = s,
+
+      state_name =
+        state_labels[as.character(s)],
+
+      observed =
+        obs_pct[, s],
+
+      modelled =
+        exp_pct[, s],
+
+      conf.low =
+        prev_ci[1, , s],
+
+      conf.high =
+        prev_ci[2, , s]
+    )
+  }
+) %>%
   mutate(
-    series = factor(
-      series,
-      levels = c("observed", "expected"),
-      labels = c("Observed", "Modelled")
-    ),
     state_name = factor(
       state_name,
-      levels = c("CAV 0", "CAV 1", "CAV >=2", "Death")
+      levels = c(
+        "CAV 0",
+        "CAV 1",
+        "CAV >=2",
+        "Death"
+      )
     )
   )
 
+
+# Quick checks
+head(prev_sahl_df)
+
+prev_sahl_df %>%
+  group_by(state_name) %>%
+  summarise(
+    max_observed = max(observed, na.rm = TRUE),
+    max_modelled = max(modelled, na.rm = TRUE),
+    max_upper_CI = max(conf.high, na.rm = TRUE)
+  )
+
+
+# ==============================================================================
+# 9. PUBLICATION-READY PREVALENCE FIGURE
+# ==============================================================================
+
 p_prev_sahl <- ggplot(
-  prev_sahl_long,
-  aes(x = time, y = prevalence, colour = series, linetype = series)
+  prev_sahl_df,
+  aes(x = time)
 ) +
-  geom_line(linewidth = 0.9) +
-  facet_wrap(~ state_name, ncol = 2) +
+
+  # --------------------------------------------------------------------------
+  # 95% CI for modelled prevalence
+  # --------------------------------------------------------------------------
+
+  geom_ribbon(
+    aes(
+      ymin = conf.low,
+      ymax = conf.high
+    ),
+    fill = "#A23B3B",
+    alpha = 0.13
+  ) +
+
+  # --------------------------------------------------------------------------
+  # Observed prevalence
+  # --------------------------------------------------------------------------
+
+  geom_line(
+    aes(
+      y = observed,
+      colour = "Observed",
+      linetype = "Observed"
+    ),
+    linewidth = 0.9
+  ) +
+
+  # --------------------------------------------------------------------------
+  # Modelled prevalence
+  # --------------------------------------------------------------------------
+
+  geom_line(
+    aes(
+      y = modelled,
+      colour = "Modelled",
+      linetype = "Modelled"
+    ),
+    linewidth = 0.9
+  ) +
+
+  # --------------------------------------------------------------------------
+  # Four panels
+  # --------------------------------------------------------------------------
+
+  facet_wrap(
+    ~ state_name,
+    ncol = 2,
+    scales = "free_y"
+  ) +
+
+  # --------------------------------------------------------------------------
+  # State-specific y-axis scales
+  #
+  # CAV 0   : 0-100%
+  # CAV 1   : 0-10%
+  # CAV >=2 : 0-10%
+  # Death   : 0-100%
+  #
+  # oob = squish means that if a CI extends slightly beyond 10%, it is
+  # visually clipped at 10 rather than causing the whole ribbon to disappear.
+  # --------------------------------------------------------------------------
+
+  ggh4x::facetted_pos_scales(
+
+    y = list(
+
+      state_name == "CAV 0" ~
+        scale_y_continuous(
+          limits = c(0, 100),
+          breaks = seq(0, 100, by = 20),
+          expand = expansion(
+            mult = c(0, 0.02)
+          ),
+          oob = scales::squish
+        ),
+
+      state_name == "CAV 1" ~
+        scale_y_continuous(
+          limits = c(0, 10),
+          breaks = seq(0, 10, by = 2),
+          expand = expansion(
+            mult = c(0, 0.02)
+          ),
+          oob = scales::squish
+        ),
+
+      state_name == "CAV >=2" ~
+        scale_y_continuous(
+          limits = c(0, 10),
+          breaks = seq(0, 10, by = 2),
+          expand = expansion(
+            mult = c(0, 0.02)
+          ),
+          oob = scales::squish
+        ),
+
+      state_name == "Death" ~
+        scale_y_continuous(
+          limits = c(0, 100),
+          breaks = seq(0, 100, by = 20),
+          expand = expansion(
+            mult = c(0, 0.02)
+          ),
+          oob = scales::squish
+        )
+    )
+  ) +
+
+  # --------------------------------------------------------------------------
+  # Common x-axis
+  # --------------------------------------------------------------------------
+
   scale_x_continuous(
-    breaks = 0:7,
     limits = c(0, 7),
-    expand = expansion(mult = c(0, 0.01))
+    breaks = 0:7,
+    expand = expansion(
+      mult = c(0, 0.01)
+    )
   ) +
-  scale_y_continuous(
-    breaks = seq(0, 100, 20),
-    limits = c(0, 100),
-    expand = expansion(mult = c(0, 0.02))
+
+  # --------------------------------------------------------------------------
+  # Colours and line types
+  # --------------------------------------------------------------------------
+
+  scale_colour_manual(
+    values = c(
+      "Observed" = "#1F4E79",
+      "Modelled" = "#A23B3B"
+    )
   ) +
-  scale_colour_manual(values = c("Observed" = "#1F4E79", "Modelled" = "#A23B3B")) +
-  scale_linetype_manual(values = c("Observed" = "solid", "Modelled" = "dashed")) +
+
+  scale_linetype_manual(
+    values = c(
+      "Observed" = "solid",
+      "Modelled" = "dashed"
+    )
+  ) +
+
+  # --------------------------------------------------------------------------
+  # Labels
+  # --------------------------------------------------------------------------
+
   labs(
     x = "Years after heart transplantation",
     y = "Prevalence (%)",
     colour = NULL,
     linetype = NULL
   ) +
-  theme_minimal(base_size = 11, base_family = PLOT_FONT) +
+
+  # --------------------------------------------------------------------------
+  # Theme
+  # --------------------------------------------------------------------------
+
+  theme_minimal(
+    base_size = 11,
+    base_family = "Aptos"
+  ) +
+
   theme(
-    panel.grid.minor = element_blank(),
-    panel.grid.major.x = element_blank(),
-    panel.grid.major.y = element_line(linewidth = 0.25, colour = "grey85"),
-    panel.border = element_rect(fill = NA, colour = "grey35", linewidth = 0.5),
-    strip.text = element_text(face = "bold", size = 11),
-    axis.title = element_text(size = 11),
-    axis.text = element_text(size = 10),
-    legend.position = "bottom"
+    panel.grid.minor =
+      element_blank(),
+
+    panel.grid.major.x =
+      element_blank(),
+
+    panel.grid.major.y =
+      element_line(
+        linewidth = 0.25,
+        colour = "grey85"
+      ),
+
+    panel.border =
+      element_rect(
+        fill = NA,
+        colour = "grey40",
+        linewidth = 0.5
+      ),
+
+    strip.text =
+      element_text(
+        face = "bold",
+        size = 11
+      ),
+
+    axis.title =
+      element_text(
+        size = 11
+      ),
+
+    axis.text =
+      element_text(
+        size = 10
+      ),
+
+    legend.position =
+      "bottom",
+
+    legend.text =
+      element_text(
+        size = 10
+      ),
+
+    plot.margin =
+      margin(
+        t = 10,
+        r = 10,
+        b = 5,
+        l = 10
+      )
   )
 
+
+# Display
+p_prev_sahl
+
+
+# ==============================================================================
+# 10. SAVE FIGURE
+# ==============================================================================
+
 ggsave(
-  file.path(OUT_DIR, paste0("Figure_prevalence_Sahlgrenska_", RUN_DATE, ".pdf")),
-  p_prev_sahl,
+  filename = paste0(
+    "CAV_prevalence_Sahlgrenska_",
+    Sys.Date(),
+    ".pdf"
+  ),
+  plot = p_prev_sahl,
   width = 9,
   height = 7,
   device = cairo_pdf
 )
 
+
 ggsave(
-  file.path(OUT_DIR, paste0("Figure_prevalence_Sahlgrenska_", RUN_DATE, ".png")),
-  p_prev_sahl,
+  filename = paste0(
+    "CAV_prevalence_Sahlgrenska_",
+    Sys.Date(),
+    ".png"
+  ),
+  plot = p_prev_sahl,
   width = 9,
   height = 7,
   dpi = 600,
