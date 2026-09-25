@@ -12,6 +12,57 @@
 #
 # No event-count or event-rate columns are produced for the multi-state model.
 # ============================================================================
+windows <- tibble(
+  timepoint = c("1 year", "3 years", "6 years"),
+  start = c(0.5, 2, 4),
+  end   = c(2, 4, 7)
+)
+
+coverage_tab <- bind_rows(
+  lapply(seq_len(nrow(windows)), function(i) {
+
+    w <- windows[i, ]
+
+    # One row per patient with death time
+    pats <- dat %>%
+      group_by(lopnr) %>%
+      summarise(
+        death_time = if (any(state == 4)) {
+          min(years[state == 4])
+        } else {
+          Inf
+        },
+        .groups = "drop"
+      ) %>%
+      # Eligible if alive when the window starts
+      filter(death_time > w$start)
+
+    # At least one real angiography during the window
+    angio_ids <- dat %>%
+      filter(
+        lopnr %in% pats$lopnr,
+        artificial == FALSE,
+        years > 0,
+        state %in% 0:3,
+        years >= w$start,
+        years < w$end
+      ) %>%
+      distinct(lopnr) %>%
+      pull(lopnr)
+
+    tibble(
+      timepoint = w$timepoint,
+      window = paste0(w$start, "–<", w$end, " years"),
+      eligible = nrow(pats),
+      angio = sum(pats$lopnr %in% angio_ids),
+      no_angio = sum(!pats$lopnr %in% angio_ids),
+      proportion = angio / eligible
+    )
+  })
+)
+
+
+
 
 # ==============================================================================
 # 0. PACKAGES / OPTIONS / OUTPUT DIRECTORY
