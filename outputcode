@@ -817,6 +817,263 @@ pw3_check <- make_sahl_piecewise_profile(3)
 pw3_check$times
 pw3_check$covariates
 
+# ------------------------------------------------------------------------------
+# 7.4 Function to calculate P(0,t) with 95% CIs
+# ------------------------------------------------------------------------------
+
+# CIs are obtained by simulation from the asymptotic multivariate normal
+# distribution of the fitted parameters.
+#
+# This is NOT a patient bootstrap.
+
+B_CI <- 1000
+
+
+get_P_sahl <- function(t) {
+
+  # Covariate history appropriate for this particular horizon
+  pw <- make_sahl_piecewise_profile(t)
+
+
+  # pmatrix.piecewise.msm() obtains the fitted Q separately for each interval
+  # and calculates:
+  #
+  # P(0,t) = P1 %*% P2 %*% ... %*% Pk
+  #
+  # Thus both the early q14 intensity and subsequent age-related changes
+  # in the intensities are incorporated.
+
+  P <- pmatrix.piecewise.msm(
+    fit_adj,
+    t1 = 0,
+    t2 = t,
+    times = pw$times,
+    covariates = pw$covariates,
+    ci = "normal",
+    cl = 0.95,
+    B = B_CI
+  )
+
+
+  # pmatrix.piecewise.msm() returns:
+  #   P$estimates = point estimates
+  #   P$L         = lower CI
+  #   P$U         = upper CI
+
+  nstates <- nrow(
+    P$estimates
+  )
+
+
+  # as.vector(matrix) runs down columns, so this index structure
+  # deliberately varies 'state' first.
+  ind <- expand.grid(
+    state = seq_len(nstates),
+    tostate = seq_len(nstates)
+  )
+
+
+  tibble(
+    year = t,
+
+    state = ind$state,
+    tostate = ind$tostate,
+
+    estimate = as.vector(
+      P$estimates
+    ),
+
+    conf.low = as.vector(
+      P$L
+    ),
+
+    conf.high = as.vector(
+      P$U
+    )
+  ) %>%
+
+    mutate(
+      from_state =
+        state_labels[
+          as.character(state)
+        ],
+
+      to_state =
+        state_labels[
+          as.character(tostate)
+        ],
+
+      transition = paste0(
+        from_state,
+        " -> ",
+        to_state
+      )
+    )
+}
+
+
+# ------------------------------------------------------------------------------
+# 7.5 Test cheaply before running B = 1000
+# ------------------------------------------------------------------------------
+
+# Optional but useful while checking that everything works:
+#
+# B_CI <- 20
+# test_P <- get_P_sahl(1)
+# test_P
+#
+# Then restore:
+#
+# B_CI <- 1000
+
+
+# ------------------------------------------------------------------------------
+# 7.6 Calculate P(0,1), P(0,3) and P(0,6)
+# ------------------------------------------------------------------------------
+
+# The three horizons are independent calculations, so run them on three cores.
+
+library(parallel)
+
+RNGkind("L'Ecuyer-CMRG")
+set.seed(1234)
+
+
+P_list <- parallel::mclapply(
+  c(1, 3, 6),
+  FUN = get_P_sahl,
+  mc.cores = 3,
+  mc.set.seed = TRUE
+)
+
+
+P_sahl_136 <- bind_rows(
+  P_list
+) %>%
+
+  select(
+    year,
+    state,
+    tostate,
+    from_state,
+    to_state,
+    transition,
+    estimate,
+    conf.low,
+    conf.high
+  )
+
+
+P_sahl_136
+
+
+# ------------------------------------------------------------------------------
+# 7.7 Check transition probability matrices
+# ------------------------------------------------------------------------------
+
+# Every row should sum to 1, apart from tiny numerical rounding error.
+
+P_sahl_136 %>%
+  group_by(
+    year,
+    state,
+    from_state
+  ) %>%
+
+  summarise(
+    row_sum = sum(
+      estimate
+    ),
+    .groups = "drop"
+  )
+
+
+# ------------------------------------------------------------------------------
+# 7.8 Reporting table: estimate (95% CI)
+# ------------------------------------------------------------------------------
+
+P_sahl_136_report <- P_sahl_136 %>%
+
+  mutate(
+    probability_ci = sprintf(
+      "%.3f (%.3f-%.3f)",
+      estimate,
+      conf.low,
+      conf.high
+    )
+  ) %>%
+
+  select(
+    year,
+    from_state,
+    to_state,
+    probability_ci
+  ) %>%
+
+  pivot_wider(
+    names_from = to_state,
+    values_from = probability_ci
+  ) %>%
+
+  mutate(
+    from_state = factor(
+      from_state,
+      levels = c(
+        "CAV 0",
+        "CAV 1",
+        "CAV >=2",
+        "Death / Re-HTx"
+      )
+    )
+  ) %>%
+
+  arrange(
+    year,
+    from_state
+  )
+
+
+P_sahl_136_report
+
+
+# ------------------------------------------------------------------------------
+# 7.9 Point-estimate matrix for SAS if wanted separately
+# ------------------------------------------------------------------------------
+
+P_sahl_136_wide <- P_sahl_136 %>%
+
+  select(
+    year,
+    from_state,
+    to_state,
+    estimate
+  ) %>%
+
+  pivot_wider(
+    names_from = to_state,
+    values_from = estimate
+  ) %>%
+
+  mutate(
+    from_state = factor(
+      from_state,
+      levels = c(
+        "CAV 0",
+        "CAV 1",
+        "CAV >=2",
+        "Death / Re-HTx"
+      )
+    )
+  ) %>%
+
+  arrange(
+    year,
+    from_state
+  )
+
+
+P_sahl_136_wide
+
 # ==============================================================================
 # 9. EXPECTED LENGTH OF STAY IN EACH STATE DURING YEARS 0-7
 # ==============================================================================
