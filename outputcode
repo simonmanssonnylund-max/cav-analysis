@@ -648,6 +648,8 @@ ggsave(
 #    REPRESENTATIVE SAHLGRENSKA PATIENT
 # ==============================================================================
 
+library(parallel)
+
 
 # ------------------------------------------------------------------------------
 # 7.1 Representative Sahlgrenska covariate profile
@@ -657,13 +659,15 @@ ggsave(
 sahl_baseline_df <- baseline_df %>%
   filter(unit == sahl_level)
 
-# Mean for continuous covariate
+
+# Mean baseline age
 age_sahl <- mean(
   sahl_baseline_df$age,
   na.rm = TRUE
 )
 
-# Mode for categorical covariates
+
+# Modal categorical covariates
 sex_sahl <- mode1(
   sahl_baseline_df$sex
 )
@@ -672,12 +676,11 @@ era_sahl <- mode1(
   sahl_baseline_df$tx_era
 )
 
-# Unit is fixed to Sahlgrenska
 unit_sahl <- sahl_level
 
 
-# Display profile used
-tibble(
+# Display the covariate profile used
+sahl_profile <- tibble(
   variable = c(
     "Age at HTx",
     "Sex",
@@ -692,17 +695,23 @@ tibble(
   )
 )
 
+sahl_profile
+
 
 # ------------------------------------------------------------------------------
-# 7.2 Piecewise covariate history for representative Sahlgrenska patient
+# 7.2 Piecewise covariate history
 # ------------------------------------------------------------------------------
 
-# Age changes with follow-up time.
-# post_cut changes from Early to After at 21 days.
+# The model contains two time-varying features:
+#
+# 1. attained age, updated yearly
+# 2. post_cut, changing from "Early" to "After" at 21 days
+#
+# Sex, unit and transplantation era remain fixed.
 
 make_sahl_piecewise_profile <- function(tmax) {
 
-  # Annual age updates
+  # Annual age-update times
   annual_cuts <- seq_len(
     floor(tmax)
   )
@@ -711,7 +720,8 @@ make_sahl_piecewise_profile <- function(tmax) {
     annual_cuts < tmax
   ]
 
-  # Include the 21-day mortality breakpoint
+
+  # Include the 21-day breakpoint
   cuts <- sort(
     unique(
       c(
@@ -726,13 +736,15 @@ make_sahl_piecewise_profile <- function(tmax) {
       cuts < tmax
   ]
 
-  # Beginning of each interval
+
+  # Start of each piecewise-constant interval
   interval_starts <- c(
     0,
     cuts
   )
 
-  # Covariate values applying during each interval
+
+  # Covariate values for each interval
   covs <- lapply(
     interval_starts,
 
@@ -752,6 +764,7 @@ make_sahl_piecewise_profile <- function(tmax) {
     }
   )
 
+
   list(
     times = cuts,
     covariates = covs
@@ -760,12 +773,21 @@ make_sahl_piecewise_profile <- function(tmax) {
 
 
 # ------------------------------------------------------------------------------
-# 7.3 Calculate transition probability matrices
+# 7.3 Function for transition probability matrix at a given time
 # ------------------------------------------------------------------------------
+
+# 95% CIs are obtained by simulation from the asymptotic multivariate normal
+# distribution of the estimated model parameters.
+#
+# This is NOT a patient bootstrap.
+
+B_CI <- 1000
+
 
 get_P_sahl <- function(t) {
 
   pw <- make_sahl_piecewise_profile(t)
+
 
   P <- pmatrix.piecewise.msm(
     fit_adj,
@@ -776,6 +798,7 @@ get_P_sahl <- function(t) {
     ci = "normal",
     B = B_CI
   )
+
 
   generics::tidy(P) %>%
     mutate(
@@ -801,9 +824,26 @@ get_P_sahl <- function(t) {
 }
 
 
-P_sahl_136 <- purrr::map_dfr(
+# ------------------------------------------------------------------------------
+# 7.4 Calculate matrices at years 1, 3 and 6
+# ------------------------------------------------------------------------------
+
+# There are only three time points, so run the three calculations in parallel.
+
+RNGkind("L'Ecuyer-CMRG")
+set.seed(1234)
+
+
+P_list <- parallel::mclapply(
   c(1, 3, 6),
-  get_P_sahl
+  FUN = get_P_sahl,
+  mc.cores = 3,
+  mc.set.seed = TRUE
+)
+
+
+P_sahl_136 <- bind_rows(
+  P_list
 ) %>%
   select(
     year,
@@ -819,11 +859,103 @@ P_sahl_136 <- purrr::map_dfr(
   )
 
 
+# Full long-format result
+P_sahl_136
+
+
 # ------------------------------------------------------------------------------
-# 7.4 Full transition probability matrices
+# 7.5 Wide transition probability matrices for reporting
 # ------------------------------------------------------------------------------
 
-P_sahl_136
+# Point estimates
+P_sahl_136_wide <- P_sahl_136 %>%
+  select(
+    year,
+    from_state,
+    to_state,
+    estimate
+  ) %>%
+  pivot_wider(
+    names_from = to_state,
+    values_from = estimate
+  ) %>%
+  arrange(
+    year,
+    factor(
+      from_state,
+      levels = c(
+        "CAV 0",
+        "CAV 1",
+        "CAV >=2",
+        "Death / Re-HTx"
+      )
+    )
+  )
+
+P_sahl_136_wide
+
+
+# ------------------------------------------------------------------------------
+# 7.6 Reporting table with 95% CI
+# ------------------------------------------------------------------------------
+
+P_sahl_136_report <- P_sahl_136 %>%
+  mutate(
+    estimate_ci = sprintf(
+      "%.3f (%.3f-%.3f)",
+      estimate,
+      conf.low,
+      conf.high
+    )
+  ) %>%
+  select(
+    year,
+    from_state,
+    to_state,
+    estimate_ci
+  ) %>%
+  pivot_wider(
+    names_from = to_state,
+    values_from = estimate_ci
+  ) %>%
+  arrange(
+    year,
+    factor(
+      from_state,
+      levels = c(
+        "CAV 0",
+        "CAV 1",
+        "CAV >=2",
+        "Death / Re-HTx"
+      )
+    )
+  )
+
+P_sahl_136_report
+
+
+# ------------------------------------------------------------------------------
+# 7.7 Optional checks
+# ------------------------------------------------------------------------------
+
+# Each row of every transition probability matrix should sum to approximately 1.
+
+P_sahl_136 %>%
+  group_by(
+    year,
+    from_state
+  ) %>%
+  summarise(
+    row_sum = sum(
+      estimate,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  )
+
+
+# Profile used in the calculation
+sahl_profile
 
 # ==============================================================================
 # 9. EXPECTED LENGTH OF STAY IN EACH STATE DURING YEARS 0-7
