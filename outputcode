@@ -788,7 +788,6 @@ get_P_sahl <- function(t) {
 
   pw <- make_sahl_piecewise_profile(t)
 
-
   P <- pmatrix.piecewise.msm(
     fit_adj,
     t1 = 0,
@@ -799,27 +798,29 @@ get_P_sahl <- function(t) {
     B = B_CI
   )
 
+  nstates <- nrow(P$estimates)
 
-  generics::tidy(P) %>%
+  ind <- expand.grid(
+    state = seq_len(nstates),
+    tostate = seq_len(nstates)
+  )
+
+  tibble(
+    year = t,
+    state = ind$state,
+    tostate = ind$tostate,
+    estimate = as.vector(P$estimates),
+    conf.low = as.vector(P$L),
+    conf.high = as.vector(P$U)
+  ) %>%
     mutate(
-      year = t,
-
-      from_state =
-        state_labels[
-          as.character(state)
-        ],
-
-      to_state =
-        state_labels[
-          as.character(tostate)
-        ],
-
-      transition =
-        paste0(
-          from_state,
-          " -> ",
-          to_state
-        )
+      from_state = state_labels[as.character(state)],
+      to_state = state_labels[as.character(tostate)],
+      transition = paste0(
+        from_state,
+        " -> ",
+        to_state
+      )
     )
 }
 
