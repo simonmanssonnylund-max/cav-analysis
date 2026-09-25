@@ -644,37 +644,130 @@ ggsave(
 )
 
 # ==============================================================================
-# 7. OBSERVED / EXPECTED PREVALENCE AT YEARS 1, 3 AND 6
+# 7. TRANSITION PROBABILITY MATRICES AT YEARS 1, 3 AND 6
+#    REPRESENTATIVE SAHLGRENSKA PATIENT
 # ==============================================================================
 
-cen_all <- cens$obs_yrs[match(model_ids, cens$lopnr)]
-stopifnot(!anyNA(cen_all))
 
-pw6 <- make_piecewise_profile(6)
+# ------------------------------------------------------------------------------
+# 7.1 Representative Sahlgrenska covariate profile
+# ------------------------------------------------------------------------------
 
-prev_136 <- prevalence.msm(
-  fit_adj,
-  times = c(1, 3, 6),
-  censtime = cen_all,
-  piecewise.times = pw6$times,
-  piecewise.covariates = pw6$covariates,
-  interp = "start",
-  ci = "none"
+# One baseline row per Sahlgrenska patient
+sahl_baseline_df <- baseline_df %>%
+  filter(unit == sahl_level)
+
+# Mean for continuous covariate
+age_sahl <- mean(
+  sahl_baseline_df$age,
+  na.rm = TRUE
 )
 
-prevalence_136 <- generics::tidy(prev_136) %>%
-  filter(output == "percentage") %>%
-  mutate(state_name = state_labels[as.character(state)]) %>%
-  select(time, state, state_name, observed, expected)
+# Mode for categorical covariates
+sex_sahl <- mode1(
+  sahl_baseline_df$sex
+)
 
-# ==============================================================================
-# 8. TRANSITION PROBABILITY MATRICES AT YEARS 1, 3 AND 6
-# ==============================================================================
+era_sahl <- mode1(
+  sahl_baseline_df$tx_era
+)
 
-get_P <- function(t) {
-  pw <- make_piecewise_profile(t)
+# Unit is fixed to Sahlgrenska
+unit_sahl <- sahl_level
 
-  pmatrix.piecewise.msm(
+
+# Display profile used
+tibble(
+  variable = c(
+    "Age at HTx",
+    "Sex",
+    "Unit",
+    "Transplantation era"
+  ),
+  value = c(
+    round(age_sahl, 1),
+    sex_sahl,
+    unit_sahl,
+    era_sahl
+  )
+)
+
+
+# ------------------------------------------------------------------------------
+# 7.2 Piecewise covariate history for representative Sahlgrenska patient
+# ------------------------------------------------------------------------------
+
+# Age changes with follow-up time.
+# post_cut changes from Early to After at 21 days.
+
+make_sahl_piecewise_profile <- function(tmax) {
+
+  # Annual age updates
+  annual_cuts <- seq_len(
+    floor(tmax)
+  )
+
+  annual_cuts <- annual_cuts[
+    annual_cuts < tmax
+  ]
+
+  # Include the 21-day mortality breakpoint
+  cuts <- sort(
+    unique(
+      c(
+        CUT_YEARS,
+        annual_cuts
+      )
+    )
+  )
+
+  cuts <- cuts[
+    cuts > 0 &
+      cuts < tmax
+  ]
+
+  # Beginning of each interval
+  interval_starts <- c(
+    0,
+    cuts
+  )
+
+  # Covariate values applying during each interval
+  covs <- lapply(
+    interval_starts,
+
+    function(t) {
+
+      make_covlist(
+        age_value = age_sahl + t,
+        sex_value = sex_sahl,
+        unit_value = unit_sahl,
+        era_value = era_sahl,
+        period_value = ifelse(
+          t < CUT_YEARS,
+          "Early",
+          "After"
+        )
+      )
+    }
+  )
+
+  list(
+    times = cuts,
+    covariates = covs
+  )
+}
+
+
+# ------------------------------------------------------------------------------
+# 7.3 Calculate transition probability matrices
+# ------------------------------------------------------------------------------
+
+get_P_sahl <- function(t) {
+
+  pw <- make_sahl_piecewise_profile(t)
+
+  P <- pmatrix.piecewise.msm(
     fit_adj,
     t1 = 0,
     t2 = t,
@@ -682,19 +775,55 @@ get_P <- function(t) {
     covariates = pw$covariates,
     ci = "normal",
     B = B_CI
-  ) %>%
-    generics::tidy() %>%
-    label_msm_matrix() %>%
-    mutate(year = t)
-}
-
-P_136 <- map_dfr(c(1, 3, 6), get_P) %>%
-  select(
-    year, state, tostate, from_state, to_state,
-    estimate, std.error, conf.low, conf.high
   )
 
-P_136_from_CAV0 <- P_136 %>% filter(state == 1)
+  generics::tidy(P) %>%
+    mutate(
+      year = t,
+
+      from_state =
+        state_labels[
+          as.character(state)
+        ],
+
+      to_state =
+        state_labels[
+          as.character(tostate)
+        ],
+
+      transition =
+        paste0(
+          from_state,
+          " -> ",
+          to_state
+        )
+    )
+}
+
+
+P_sahl_136 <- purrr::map_dfr(
+  c(1, 3, 6),
+  get_P_sahl
+) %>%
+  select(
+    year,
+    state,
+    tostate,
+    from_state,
+    to_state,
+    transition,
+    estimate,
+    std.error,
+    conf.low,
+    conf.high
+  )
+
+
+# ------------------------------------------------------------------------------
+# 7.4 Full transition probability matrices
+# ------------------------------------------------------------------------------
+
+P_sahl_136
 
 # ==============================================================================
 # 9. EXPECTED LENGTH OF STAY IN EACH STATE DURING YEARS 0-7
