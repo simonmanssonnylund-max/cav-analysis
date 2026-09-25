@@ -1145,9 +1145,6 @@ los_0_7 <- totlos.msm(
   mutate(state_name = state_labels[as.character(state)]) %>%
   select(state, state_name, estimate, conf.low, conf.high)
 
-# ==============================================================================
-# 10. PROBABILITY THAT EACH STATE IS NEXT
-# ==============================================================================
 # Time-varying next-state probabilities from t = 0
 # Representative Sahlgrenska patient
 # Requires existing objects: dat, fit_adj
@@ -1244,6 +1241,107 @@ pnext_piecewise_from0 <- function(fit,
   for (k in seq_len(length(change_times) - 1)) {
 
     t0 <- change_times[k]
+    t1 <- change_times[k + 1]
+    dt <- t1 - t0
+
+    period_value <- if (t0 < CUT_YEARS) "Early" else "After"
+
+    covs <- make_covlist(
+      age_value    = age0 + t0,
+      sex_value    = sex_value,
+      unit_value   = unit_value,
+      era_value    = era_value,
+      period_value = period_value
+    )
+
+    Q_now <- qmatrix.msm(
+      fit,
+      covariates = covs,
+      ci = "none"
+    )
+
+    lambda <- -Q_now[from_state, from_state]
+
+    # No possible exit from an absorbing state
+    if (lambda <= 0)
+      break
+
+    # Probability of leaving the current state in this interval
+    p_leave <- 1 - exp(-lambda * dt)
+
+    # Allocate that exit probability over the allowed destinations
+    for (s in seq_len(ncol(Q_now))) {
+      if (s != from_state && Q_now[from_state, s] > 0) {
+        next_prob[s] <- next_prob[s] +
+          surv_in_state *
+          (Q_now[from_state, s] / lambda) *
+          p_leave
+      }
+    }
+
+    # Probability of still being in the original state at interval end
+    surv_in_state <- surv_in_state * exp(-lambda * dt)
+
+    if (surv_in_state < tol)
+      break
+  }
+
+  tibble(
+    from_state = from_state,
+    to_state = seq_along(next_prob),
+    probability = next_prob,
+    no_transition_by_max_time = surv_in_state
+  )
+}
+
+# -----------------------------
+# 5. Calculate for all transient states
+# -----------------------------
+
+pnext_sahl <- bind_rows(
+  pnext_piecewise_from0(fit_adj, 1),
+  pnext_piecewise_from0(fit_adj, 2),
+  pnext_piecewise_from0(fit_adj, 3)
+) %>%
+  filter(probability > 0)
+
+# -----------------------------
+# 6. Add readable state labels
+# -----------------------------
+
+state_labels <- c(
+  "1" = "CAV 0",
+  "2" = "CAV 1",
+  "3" = "CAV >=2",
+  "4" = "Death / Re-HTx"
+)
+
+pnext_sahl <- pnext_sahl %>%
+  mutate(
+    from_name = unname(state_labels[as.character(from_state)]),
+    to_name   = unname(state_labels[as.character(to_state)])
+  ) %>%
+  select(
+    from_state, from_name,
+    to_state, to_name,
+    probability,
+    no_transition_by_max_time
+  )
+
+print(pnext_sahl)
+
+# Check that next-state probabilities + residual probability are ~1
+pnext_check <- pnext_sahl %>%
+  group_by(from_state, from_name) %>%
+  summarise(
+    sum_next_prob = sum(probability),
+    residual = first(no_transition_by_max_time),
+    total = sum_next_prob + residual,
+    .groups = "drop"
+  )
+
+print(pnext_check)
+
 
 # ==============================================================================
 # 11. PASSAGE PROBABILITIES BY YEAR 7
