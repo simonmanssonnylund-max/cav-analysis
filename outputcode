@@ -1148,33 +1148,102 @@ los_0_7 <- totlos.msm(
 # ==============================================================================
 # 10. PROBABILITY THAT EACH STATE IS NEXT
 # ==============================================================================
+# Time-varying next-state probabilities from t = 0
+# Representative Sahlgrenska patient
+# Requires existing objects: dat, fit_adj
 
-# pnext.msm evaluates one fixed Q, so show both early and post-cut profiles.
-pnext_early <- pnext.msm(
-  fit_adj,
-  covariates = ref_early,
-  ci = "normal",
-  B = B_CI
-) %>%
-  generics::tidy() %>%
-  label_msm_matrix() %>%
-  mutate(period = "Early")
+library(dplyr)
+library(tibble)
+library(msm)
 
-pnext_after <- pnext.msm(
-  fit_adj,
-  covariates = ref_after,
-  ci = "normal",
-  B = B_CI
-) %>%
-  generics::tidy() %>%
-  label_msm_matrix() %>%
-  mutate(period = "After cut")
+# -----------------------------
+# 1. Settings
+# -----------------------------
 
-pnext_table <- bind_rows(pnext_early, pnext_after) %>%
-  select(
-    period, state, tostate, from_state, to_state,
-    estimate, std.error, conf.low, conf.high
+CUT_YEARS <- 30 / 365.25
+MAX_TIME  <- 50
+TOL       <- 1e-10
+
+# -----------------------------
+# 2. Representative Sahlgrenska patient
+# -----------------------------
+
+mode1 <- function(x) {
+  x <- x[!is.na(x)]
+  names(which.max(table(x)))
+}
+
+# Every patient has one transplant row at years == 0
+patient_df <- dat %>%
+  filter(years == 0) %>%
+  distinct(lopnr, .keep_all = TRUE)
+
+sahl_df <- patient_df %>%
+  filter(unit == "Sahlgrenska")
+
+age_sahl  <- mean(sahl_df$age_at_tx, na.rm = TRUE)
+sex_sahl  <- mode1(sahl_df$sex)
+era_sahl  <- mode1(sahl_df$tx_era)
+unit_sahl <- "Sahlgrenska"
+
+# -----------------------------
+# 3. Convert reference values to the covariate names used by msm
+# -----------------------------
+
+make_covlist <- function(age_value,
+                         sex_value = sex_sahl,
+                         unit_value = unit_sahl,
+                         era_value = era_sahl,
+                         period_value = "After") {
+
+  nd <- data.frame(
+    sex      = factor(sex_value, levels = levels(dat$sex)),
+    age      = age_value,
+    unit     = factor(unit_value, levels = levels(dat$unit)),
+    tx_era   = factor(era_value, levels = levels(dat$tx_era)),
+    post_cut = factor(period_value, levels = levels(dat$post_cut))
   )
+
+  mm <- model.matrix(
+    ~ sex + age + unit + tx_era + post_cut,
+    data = nd
+  )
+
+  vals <- as.numeric(mm[1, -1, drop = TRUE])
+  names(vals) <- colnames(mm)[-1]
+
+  as.list(vals)
+}
+
+# -----------------------------
+# 4. Time-varying analogue of pnext.msm(), starting at t = 0
+# -----------------------------
+
+pnext_piecewise_from0 <- function(fit,
+                                  from_state,
+                                  age0 = age_sahl,
+                                  sex_value = sex_sahl,
+                                  unit_value = unit_sahl,
+                                  era_value = era_sahl,
+                                  max_time = MAX_TIME,
+                                  tol = TOL) {
+
+  # Q changes at day 30 and when attained age is updated yearly
+  annual_cuts <- seq(1, floor(max_time), by = 1)
+
+  change_times <- sort(unique(c(
+    0,
+    if (CUT_YEARS < max_time) CUT_YEARS,
+    annual_cuts[annual_cuts < max_time],
+    max_time
+  )))
+
+  next_prob     <- numeric(4)
+  surv_in_state <- 1
+
+  for (k in seq_len(length(change_times) - 1)) {
+
+    t0 <- change_times[k]
 
 # ==============================================================================
 # 11. PASSAGE PROBABILITIES BY YEAR 7
