@@ -1411,22 +1411,39 @@ print(pnext_check)
 # 11. PASSAGE PROBABILITIES BY YEAR 7
 # ==============================================================================
 
-# Probability of having visited each state at least once by year 7.
-passage_7 <- ppass.msm(
-  fit_adj,
-  tot = 7,
-  start = 1,
-  piecewise.times = pw7$times,
-  piecewise.covariates = pw7$covariates,
-  ci = "normal",
-  B = B_CI
-) %>%
-  generics::tidy() %>%
-  label_msm_matrix() %>%
-  select(
-    state, tostate, from_state, to_state,
-    estimate, std.error, conf.low, conf.high
-  )
+passage_136 <- purrr::map_dfr(
+  c(1, 3, 6),
+  function(t) {
+
+    # Keep only covariate change points before the requested horizon
+    keep <- pw7$times < t
+
+    times_t <- pw7$times[keep]
+    covs_t  <- pw7$covariates[seq_len(sum(keep) + 1)]
+
+    ppass.msm(
+      fit_adj,
+      tot = t,
+      start = "all",
+      piecewise.times = times_t,
+      piecewise.covariates = covs_t,
+      ci = "normal",
+      B = B_CI
+    ) %>%
+      generics::tidy() %>%
+      label_msm_matrix() %>%
+      filter(from_state == "CAV 0") %>%
+      mutate(year = t, .before = 1) %>%
+      select(
+        year,
+        state, tostate,
+        from_state, to_state,
+        estimate, std.error, conf.low, conf.high
+      )
+  }
+)
+
+passage_136
 
 # ==============================================================================
 # 12. RATIOS OF TRANSITION INTENSITIES
