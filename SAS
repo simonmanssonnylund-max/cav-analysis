@@ -128,6 +128,17 @@ options validvarname=any;
  * Equal constrained effects are put in the same block. HR and p-value cells span the
  * transition rows belonging to that block.
  ****************************************************************************************/
+/****************************************************************************************
+ * HR tables
+ *
+ * Expected columns in BOTH Excel exports:
+ *   Transition
+ *   Covariate
+ *   HR
+ *   LCL
+ *   UCL
+ *   p_value
+ ****************************************************************************************/
 
 %macro make_hr_table(data=, outbase=, title=, footnote_text=);
 
@@ -136,27 +147,53 @@ options validvarname=any;
         length block_key $800;
         set &data.;
 
-        covariate_c = strip(vvalue(Covariate));
+        covariate_c  = strip(vvalue(Covariate));
         transition_c = strip(vvalue(Transition));
-        hr_ci_c = strip(vvalue('HR (95% CI)'n));
-        pval_c = strip(vvalue('p-value'n));
 
-        /* Same covariate + same HR + same p-value = one constrained-effect block. */
+        /* Format HR and confidence interval */
+        hr_ci_c = cats(
+            strip(put(HR, 8.2)),
+            " (",
+            strip(put(LCL, 8.2)),
+            "-",
+            strip(put(UCL, 8.2)),
+            ")"
+        );
+
+        /* Format p-value */
+        if p_value < 0.001 then
+            pval_c = "<0.001";
+        else
+            pval_c = strip(put(p_value, 6.3));
+
+        /*
+         * Identical covariate + HR + p-value values correspond to the
+         * same constrained effect and can therefore span multiple rows.
+         */
         block_key = catx("|", covariate_c, hr_ci_c, pval_c);
     run;
+
 
     proc sort data=__hr0;
         by covariate_c block_key transition_c;
     run;
 
+
+    /* Number of rows per covariate and per constrained-effect block */
     proc sql;
+
         create table __hr_cov_n as
-        select covariate_c, count(*) as cov_n
+        select
+            covariate_c,
+            count(*) as cov_n
         from __hr0
         group by covariate_c;
 
         create table __hr_block_n as
-        select covariate_c, block_key, count(*) as block_n
+        select
+            covariate_c,
+            block_key,
+            count(*) as block_n
         from __hr0
         group by covariate_c, block_key;
 
@@ -166,23 +203,42 @@ options validvarname=any;
             b.cov_n,
             c.block_n
         from __hr0 as a
+
         left join __hr_cov_n as b
-            on a.covariate_c=b.covariate_c
+            on a.covariate_c = b.covariate_c
+
         left join __hr_block_n as c
-            on a.covariate_c=c.covariate_c
-           and a.block_key=c.block_key
-        order by a.covariate_c, a.block_key, a.transition_c;
+            on  a.covariate_c = c.covariate_c
+            and a.block_key   = c.block_key
+
+        order by
+            a.covariate_c,
+            a.block_key,
+            a.transition_c
+        ;
+
     quit;
+
 
     data res.&outbase._DATA;
         set __hr;
     run;
+
+
+    /************************************************************************************
+     * Separate title RTF
+     ************************************************************************************/
 
     %make_title(
         outbase=&outbase.,
         title=&title.,
         orientation=portrait
     );
+
+
+    /************************************************************************************
+     * Main table
+     ************************************************************************************/
 
     %output_settings(orientation=portrait);
 
@@ -191,12 +247,16 @@ options validvarname=any;
         style=styles.statistical
         bodytitle;
 
+
     data _null_;
+
         set __hr end=last;
         by covariate_c block_key;
 
-        if _n_=1 then do;
+        if _n_ = 1 then do;
+
             dcl odsout obj();
+
             obj.table_start();
 
             obj.head_start();
@@ -206,14 +266,17 @@ options validvarname=any;
                 text:"Covariate",
                 overrides:"just=c vjust=m background=CXECEDEC cellwidth=4.0cm fontsize=1"
             );
+
             obj.format_cell(
                 text:"Transition",
                 overrides:"just=c vjust=m background=CXECEDEC cellwidth=5.0cm fontsize=1"
             );
+
             obj.format_cell(
                 text:"HR (95% CI)",
                 overrides:"just=c vjust=m background=CXECEDEC cellwidth=3.5cm fontsize=1"
             );
+
             obj.format_cell(
                 text:"p-value",
                 overrides:"just=c vjust=m background=CXECEDEC cellwidth=2.0cm fontsize=1"
@@ -221,11 +284,14 @@ options validvarname=any;
 
             obj.row_end();
             obj.head_end();
+
         end;
+
 
         obj.row_start();
 
-        /* Covariate name spans all its transition-specific rows. */
+
+        /* Covariate label spans all rows for that covariate */
         if first.covariate_c then
             obj.format_cell(
                 data:covariate_c,
@@ -233,41 +299,58 @@ options validvarname=any;
                 overrides:"just=l vjust=m cellwidth=4.0cm fontsize=1 font_weight=bold"
             );
 
+
         obj.format_cell(
             data:transition_c,
             overrides:"just=l vjust=t cellwidth=5.0cm fontsize=1"
         );
 
-        /* Identical constrained HR/p-value values span the relevant rows. */
+
+        /*
+         * HR and p-value span transitions sharing the same constrained
+         * coefficient.
+         */
         if first.block_key then do;
+
             obj.format_cell(
                 data:hr_ci_c,
                 row_span:block_n,
                 overrides:"just=c vjust=m cellwidth=3.5cm fontsize=1"
             );
+
             obj.format_cell(
                 data:pval_c,
                 row_span:block_n,
                 overrides:"just=c vjust=m cellwidth=2.0cm fontsize=1"
             );
+
         end;
+
 
         obj.row_end();
 
+
         if last then do;
+
             obj.row_start();
+
             obj.format_cell(
                 text:"&footnote_text.",
                 column_span:4,
                 overrides:"just=l vjust=t fontsize=1 background=CXECEDEC"
             );
+
             obj.row_end();
 
             obj.table_end();
+
         end;
+
     run;
 
+
     ods rtf close;
+
 
     proc datasets library=work nolist;
         delete __hr0 __hr_cov_n __hr_block_n __hr;
