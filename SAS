@@ -1,0 +1,832 @@
+/****************************************************************************************
+ * CAV model reporting tables
+ * Source Excel files exported from R on 2026-09-26.
+ *
+ * Assumes the project setup has already defined:
+ *   &dataroot.   root directory
+ *   &goutpath.   RTF output directory (including trailing slash/backslash)
+ *   &rdat8.      output date, e.g. 20260926
+ *
+ * Assumes styles.journal and styles.statistical are available, as in the existing
+ * reporting programs.
+ *
+ * The two HR files are handled specially so that repeated constrained HRs and p-values
+ * span the corresponding transition rows. The remaining tables use PROC REPORT.
+ ****************************************************************************************/
+
+libname org "&dataroot.\data\original";
+libname cle "&dataroot.\data\cleaned";
+libname der "&dataroot.\data\derived";
+libname res "&dataroot.\data\results";
+
+ods results;
+ods listing;
+footnote;
+title;
+
+options nofmterr;
+options mprint;
+options varinitchk=error;
+options validvarname=any;
+
+
+/****************************************************************************************
+ * 0. Import Excel files
+ ****************************************************************************************/
+
+%macro import_xlsx(file=, out=);
+    proc import
+        datafile="&dataroot.\data\Derived\&file."
+        dbms=xlsx
+        out=&out.
+        replace;
+        /* guessingrows=max; */
+    run;
+%mend;
+
+%import_xlsx(file=covariate_HRs_20260926.xlsx,       out=covariate_hrs);
+%import_xlsx(file=covariate_HRs_SAHL_20260926.xlsx,  out=covariate_hrs_sahl);
+%import_xlsx(file=coverage_by_center20260926.xlsx,    out=coverage_by_center);
+%import_xlsx(file=los_0_720260926.xlsx,               out=los_0_7);
+%import_xlsx(file=P_sahl_136_report_20260926.xlsx,    out=p_sahl_136);
+%import_xlsx(file=misclassification20260926.xlsx,     out=misclassification);
+%import_xlsx(file=passage_720260926.xlsx,             out=passage_7);
+%import_xlsx(file=ratio_13620260926.xlsx,             out=ratio_136);
+
+
+/****************************************************************************************
+ * 1. Common output helpers
+ ****************************************************************************************/
+
+%macro output_settings(orientation=portrait);
+    options orientation=&orientation.;
+    options nodate nonumber
+        leftmargin   = 2.5cm
+        rightmargin  = 2.5cm
+        topmargin    = 2.5cm
+        bottommargin = 2.5cm;
+    ods escapechar = "Â¤";
+%mend;
+
+
+/* Separate title/header RTF, matching the existing reporting template. */
+%macro make_title(outbase=, title=, orientation=portrait);
+
+    %output_settings(orientation=&orientation.);
+
+    ods rtf
+        file="&goutpath.TableHeader_&outbase._&rdat8..rtf"
+        style=styles.journal
+        bodytitle;
+
+    title;
+    ods rtf text="Â¤S={font=('Arial',11pt,bold)}&title.";
+
+    ods rtf close;
+%mend;
+
+
+/* Find the first variable that exists among a pipe-separated list of candidates.
+   The returned value is a SAS name literal when needed. */
+%macro pickvar(data=, candidates=, out=);
+    %global &out.;
+    %let &out.=;
+
+    %local dsid rc i cand pos;
+    %let dsid=%sysfunc(open(&data.,i));
+
+    %if &dsid. %then %do;
+        %let i=1;
+
+        %do %while(%length(%qscan(%superq(candidates),&i.,|)));
+            %let cand=%qscan(%superq(candidates),&i.,|);
+            %let pos=%sysfunc(varnum(&dsid.,%superq(cand)));
+
+            %if &pos. > 0 %then %do;
+                %let &out.=%sysfunc(nliteral(%superq(cand)));
+                %goto pickvar_done;
+            %end;
+
+            %let i=%eval(&i.+1);
+        %end;
+
+        %pickvar_done:
+        %let rc=%sysfunc(close(&dsid.));
+    %end;
+%mend;
+
+
+/****************************************************************************************
+ * 2. HR tables
+ *
+ * Expected report-ready columns from R:
+ *   Transition
+ *   Covariate
+ *   HR (95% CI)
+ *   p-value
+ *
+ * Equal constrained effects are put in the same block. HR and p-value cells span the
+ * transition rows belonging to that block.
+ ****************************************************************************************/
+
+%macro make_hr_table(data=, outbase=, title=, footnote_text=);
+
+    data __hr0;
+        length covariate_c transition_c hr_ci_c pval_c $200;
+        length block_key $800;
+        set &data.;
+
+        covariate_c = strip(vvalue(Covariate));
+        transition_c = strip(vvalue(Transition));
+        hr_ci_c = strip(vvalue('HR (95% CI)'n));
+        pval_c = strip(vvalue('p-value'n));
+
+        /* Same covariate + same HR + same p-value = one constrained-effect block. */
+        block_key = catx("|", covariate_c, hr_ci_c, pval_c);
+    run;
+
+    proc sort data=__hr0;
+        by covariate_c block_key transition_c;
+    run;
+
+    proc sql;
+        create table __hr_cov_n as
+        select covariate_c, count(*) as cov_n
+        from __hr0
+        group by covariate_c;
+
+        create table __hr_block_n as
+        select covariate_c, block_key, count(*) as block_n
+        from __hr0
+        group by covariate_c, block_key;
+
+        create table __hr as
+        select
+            a.*,
+            b.cov_n,
+            c.block_n
+        from __hr0 as a
+        left join __hr_cov_n as b
+            on a.covariate_c=b.covariate_c
+        left join __hr_block_n as c
+            on a.covariate_c=c.covariate_c
+           and a.block_key=c.block_key
+        order by a.covariate_c, a.block_key, a.transition_c;
+    quit;
+
+    data res.&outbase._DATA;
+        set __hr;
+    run;
+
+    %make_title(
+        outbase=&outbase.,
+        title=&title.,
+        orientation=portrait
+    );
+
+    %output_settings(orientation=portrait);
+
+    ods rtf
+        file="&goutpath.Table_&outbase._&rdat8..rtf"
+        style=styles.statistical
+        bodytitle;
+
+    data _null_;
+        set __hr end=last;
+        by covariate_c block_key;
+
+        if _n_=1 then do;
+            dcl odsout obj();
+            obj.table_start();
+
+            obj.head_start();
+            obj.row_start(type:"Header");
+
+            obj.format_cell(
+                text:"Covariate",
+                overrides:"just=c vjust=m background=CXECEDEC cellwidth=4.0cm fontsize=1"
+            );
+            obj.format_cell(
+                text:"Transition",
+                overrides:"just=c vjust=m background=CXECEDEC cellwidth=5.0cm fontsize=1"
+            );
+            obj.format_cell(
+                text:"HR (95% CI)",
+                overrides:"just=c vjust=m background=CXECEDEC cellwidth=3.5cm fontsize=1"
+            );
+            obj.format_cell(
+                text:"p-value",
+                overrides:"just=c vjust=m background=CXECEDEC cellwidth=2.0cm fontsize=1"
+            );
+
+            obj.row_end();
+            obj.head_end();
+        end;
+
+        obj.row_start();
+
+        /* Covariate name spans all its transition-specific rows. */
+        if first.covariate_c then
+            obj.format_cell(
+                data:covariate_c,
+                row_span:cov_n,
+                overrides:"just=l vjust=m cellwidth=4.0cm fontsize=1 font_weight=bold"
+            );
+
+        obj.format_cell(
+            data:transition_c,
+            overrides:"just=l vjust=t cellwidth=5.0cm fontsize=1"
+        );
+
+        /* Identical constrained HR/p-value values span the relevant rows. */
+        if first.block_key then do;
+            obj.format_cell(
+                data:hr_ci_c,
+                row_span:block_n,
+                overrides:"just=c vjust=m cellwidth=3.5cm fontsize=1"
+            );
+            obj.format_cell(
+                data:pval_c,
+                row_span:block_n,
+                overrides:"just=c vjust=m cellwidth=2.0cm fontsize=1"
+            );
+        end;
+
+        obj.row_end();
+
+        if last then do;
+            obj.row_start();
+            obj.format_cell(
+                text:"&footnote_text.",
+                column_span:4,
+                overrides:"just=l vjust=t fontsize=1 background=CXECEDEC"
+            );
+            obj.row_end();
+
+            obj.table_end();
+        end;
+    run;
+
+    ods rtf close;
+
+    proc datasets library=work nolist;
+        delete __hr0 __hr_cov_n __hr_block_n __hr;
+    quit;
+
+%mend;
+
+
+%make_hr_table(
+    data=covariate_hrs,
+    outbase=CAV_HR,
+    title=%str(Covariate effects on transition intensities in the adjusted multi-state model),
+    footnote_text=%str(HR = hazard ratio for the transition intensity. Effects constrained to be equal across transitions are displayed in merged cells.)
+);
+
+
+%make_hr_table(
+    data=covariate_hrs_sahl,
+    outbase=CAV_HR_SAHL,
+    title=%str(Covariate effects on transition intensities in the Sahlgrenska multi-state model),
+    footnote_text=%str(HR = hazard ratio for the transition intensity. The model is restricted to the Sahlgrenska cohort used for the donor-recipient difference analysis.)
+);
+
+
+/****************************************************************************************
+ * 3. Angiography coverage by centre
+ *
+ * Expected columns:
+ *   unit, timepoint, window, eligible, angio, no_angio, proportion
+ ****************************************************************************************/
+
+data coverage_report;
+    length coverage_c $40;
+    set coverage_by_center;
+
+    /* Sort 1, 3, 6 year rows numerically within centre. */
+    tp_ord = input(compress(vvalue(timepoint),,'kd'), best.);
+
+    coverage_c = cats(
+        strip(put(angio,8.)),
+        "/",
+        strip(put(eligible,8.)),
+        " (",
+        strip(put(100*proportion,6.1)),
+        "%)"
+    );
+run;
+
+proc sort data=coverage_report;
+    by unit tp_ord;
+run;
+
+data res.CAV_COVERAGE_CENTER_DATA;
+    set coverage_report;
+run;
+
+%make_title(
+    outbase=CAV_COVERAGE_CENTER,
+    title=%str(Coronary angiography coverage by centre and follow-up window),
+    orientation=portrait
+);
+
+%output_settings(orientation=portrait);
+
+ods rtf
+    file="&goutpath.Table_CAV_COVERAGE_CENTER_&rdat8..rtf"
+    style=styles.statistical
+    bodytitle;
+
+proc report data=coverage_report nowd missing split="|"
+    style(report)=[outputwidth=100% fontsize=1]
+    style(header)=[background=CXECEDEC just=c vjust=m font_weight=bold fontsize=1]
+    style(column)=[vjust=t fontsize=1];
+
+    columns unit timepoint window eligible angio coverage_c;
+
+    define unit /
+        group order=data
+        "Centre"
+        style(column)=[just=l font_weight=bold cellwidth=3.5cm];
+
+    define timepoint /
+        display
+        "Time point"
+        style(column)=[just=c cellwidth=2.0cm];
+
+    define window /
+        display
+        "Time window post-HTx"
+        style(column)=[just=c cellwidth=3.5cm];
+
+    define eligible /
+        display
+        "Eligible|N"
+        style(column)=[just=c cellwidth=2.0cm];
+
+    define angio /
+        display
+        "Angiography|n"
+        style(column)=[just=c cellwidth=2.0cm];
+
+    define coverage_c /
+        display
+        "Coverage|n/N (%)"
+        style(column)=[just=c cellwidth=3.0cm];
+
+    compute after /
+        style=[just=l background=CXECEDEC fontsize=1];
+        line "Eligible patients were alive at the start of the follow-up window. A real angiography was defined as artificial = FALSE, years > 0, and state 0-3.";
+    endcomp;
+run;
+
+ods rtf close;
+
+
+/****************************************************************************************
+ * 4. Expected length of stay during years 0-7
+ *
+ * The helper chooses the available state-label variable and CI columns automatically.
+ ****************************************************************************************/
+
+%pickvar(data=los_0_7, candidates=state_name|from_name|to_name|state|from_state, out=los_state);
+%pickvar(data=los_0_7, candidates=estimate|los|expected_los, out=los_est);
+%pickvar(data=los_0_7, candidates=conf.low|conf_low|lower|L, out=los_lo);
+%pickvar(data=los_0_7, candidates=conf.high|conf_high|upper|U, out=los_hi);
+
+%if %length(%superq(los_state)) and %length(%superq(los_est)) %then %do;
+
+    data los_report;
+        length state_c $100 estimate_c $60;
+        set los_0_7;
+
+        state_c = strip(vvalue(&los_state.));
+
+        %if %length(%superq(los_lo)) and %length(%superq(los_hi)) %then %do;
+            estimate_c = cats(
+                strip(put(&los_est.,8.2)),
+                " (",
+                strip(put(&los_lo.,8.2)),
+                "-",
+                strip(put(&los_hi.,8.2)),
+                ")"
+            );
+        %end;
+        %else %do;
+            estimate_c = strip(put(&los_est.,8.2));
+        %end;
+    run;
+
+    data res.CAV_LOS_0_7_DATA;
+        set los_report;
+    run;
+
+    %make_title(
+        outbase=CAV_LOS_0_7,
+        title=%str(Expected length of stay in each state during the first 7 years after HTx),
+        orientation=portrait
+    );
+
+    %output_settings(orientation=portrait);
+
+    ods rtf
+        file="&goutpath.Table_CAV_LOS_0_7_&rdat8..rtf"
+        style=styles.statistical
+        bodytitle;
+
+    proc report data=los_report nowd missing
+        style(report)=[outputwidth=80% fontsize=1]
+        style(header)=[background=CXECEDEC just=c vjust=m font_weight=bold fontsize=1]
+        style(column)=[vjust=t fontsize=1];
+
+        columns state_c estimate_c;
+
+        define state_c /
+            display "State"
+            style(column)=[just=l cellwidth=6.0cm];
+
+        define estimate_c /
+            display "Expected time, years (95% CI)"
+            style(column)=[just=c cellwidth=5.0cm];
+
+        compute after /
+            style=[just=l background=CXECEDEC fontsize=1];
+            line "Expected length of stay is calculated over the finite 0-7 year follow-up horizon.";
+        endcomp;
+    run;
+
+    ods rtf close;
+
+%end;
+%else %put ERROR: Could not identify the state and estimate variables in LOS_0_7.;
+
+
+/****************************************************************************************
+ * 5. Transition probabilities at years 1, 3 and 6
+ ****************************************************************************************/
+
+%pickvar(data=p_sahl_136, candidates=year|time, out=p_year);
+%pickvar(data=p_sahl_136, candidates=from_name|from_state|state, out=p_from);
+%pickvar(data=p_sahl_136, candidates=to_name|to_state|tostate, out=p_to);
+%pickvar(data=p_sahl_136, candidates=estimate|probability, out=p_est);
+%pickvar(data=p_sahl_136, candidates=conf.low|conf_low|lower|L, out=p_lo);
+%pickvar(data=p_sahl_136, candidates=conf.high|conf_high|upper|U, out=p_hi);
+
+%if %length(%superq(p_year)) and %length(%superq(p_from)) and
+    %length(%superq(p_to)) and %length(%superq(p_est)) %then %do;
+
+    data p136_report;
+        length from_c to_c $100 prob_c $60;
+        set p_sahl_136;
+
+        from_c = strip(vvalue(&p_from.));
+        to_c   = strip(vvalue(&p_to.));
+
+        %if %length(%superq(p_lo)) and %length(%superq(p_hi)) %then %do;
+            prob_c = cats(
+                strip(put(&p_est.,8.3)),
+                " (",
+                strip(put(&p_lo.,8.3)),
+                "-",
+                strip(put(&p_hi.,8.3)),
+                ")"
+            );
+        %end;
+        %else %do;
+            prob_c = strip(put(&p_est.,8.3));
+        %end;
+    run;
+
+    proc sort data=p136_report;
+        by &p_year. from_c to_c;
+    run;
+
+    data res.CAV_P_136_DATA;
+        set p136_report;
+    run;
+
+    %make_title(
+        outbase=CAV_P_136,
+        title=%str(Latent-state transition probabilities at 1, 3 and 6 years for the reference Sahlgrenska patient),
+        orientation=portrait
+    );
+
+    %output_settings(orientation=portrait);
+
+    ods rtf
+        file="&goutpath.Table_CAV_P_136_&rdat8..rtf"
+        style=styles.statistical
+        bodytitle;
+
+    proc report data=p136_report nowd missing
+        style(report)=[outputwidth=95% fontsize=1]
+        style(header)=[background=CXECEDEC just=c vjust=m font_weight=bold fontsize=1]
+        style(column)=[vjust=t fontsize=1];
+
+        columns &p_year. from_c to_c prob_c;
+
+        define &p_year. /
+            group order=data "Year"
+            style(column)=[just=c cellwidth=1.5cm font_weight=bold];
+
+        define from_c /
+            group order=data "From state"
+            style(column)=[just=l cellwidth=4.0cm];
+
+        define to_c /
+            display "To state"
+            style(column)=[just=l cellwidth=4.0cm];
+
+        define prob_c /
+            display "Probability (95% CI)"
+            style(column)=[just=c cellwidth=4.0cm];
+
+        compute after /
+            style=[just=l background=CXECEDEC fontsize=1];
+            line "Probabilities refer to the latent (true) multi-state process and therefore do not incorporate the observation misclassification matrix.";
+        endcomp;
+    run;
+
+    ods rtf close;
+
+%end;
+%else %put ERROR: Could not identify the required variables in P_SAHL_136.;
+
+
+/****************************************************************************************
+ * 6. Misclassification probabilities
+ ****************************************************************************************/
+
+%pickvar(data=misclassification, candidates=true_state|from_state|state, out=mis_true);
+%pickvar(data=misclassification, candidates=observed_state|to_state|tostate, out=mis_obs);
+%pickvar(data=misclassification, candidates=estimate|probability, out=mis_est);
+%pickvar(data=misclassification, candidates=conf.low|conf_low|lower|L, out=mis_lo);
+%pickvar(data=misclassification, candidates=conf.high|conf_high|upper|U, out=mis_hi);
+
+%if %length(%superq(mis_true)) and %length(%superq(mis_obs)) and
+    %length(%superq(mis_est)) %then %do;
+
+    data misclass_report;
+        length true_c observed_c $100 prob_c $60;
+        set misclassification;
+
+        true_c     = strip(vvalue(&mis_true.));
+        observed_c = strip(vvalue(&mis_obs.));
+
+        %if %length(%superq(mis_lo)) and %length(%superq(mis_hi)) %then %do;
+            prob_c = cats(
+                strip(put(&mis_est.,8.3)),
+                " (",
+                strip(put(&mis_lo.,8.3)),
+                "-",
+                strip(put(&mis_hi.,8.3)),
+                ")"
+            );
+        %end;
+        %else %do;
+            prob_c = strip(put(&mis_est.,8.3));
+        %end;
+    run;
+
+    proc sort data=misclass_report;
+        by true_c observed_c;
+    run;
+
+    data res.CAV_MISCLASS_DATA;
+        set misclass_report;
+    run;
+
+    %make_title(
+        outbase=CAV_MISCLASS,
+        title=%str(Estimated misclassification probabilities for observed CAV state),
+        orientation=portrait
+    );
+
+    %output_settings(orientation=portrait);
+
+    ods rtf
+        file="&goutpath.Table_CAV_MISCLASS_&rdat8..rtf"
+        style=styles.statistical
+        bodytitle;
+
+    proc report data=misclass_report nowd missing
+        style(report)=[outputwidth=85% fontsize=1]
+        style(header)=[background=CXECEDEC just=c vjust=m font_weight=bold fontsize=1]
+        style(column)=[vjust=t fontsize=1];
+
+        columns true_c observed_c prob_c;
+
+        define true_c /
+            group order=data "True latent state"
+            style(column)=[just=l cellwidth=4.5cm font_weight=bold];
+
+        define observed_c /
+            display "Observed state"
+            style(column)=[just=l cellwidth=4.5cm];
+
+        define prob_c /
+            display "Probability (95% CI)"
+            style(column)=[just=c cellwidth=4.0cm];
+
+        compute after /
+            style=[just=l background=CXECEDEC fontsize=1];
+            line "Rows condition on the true latent CAV state; probabilities describe the fitted observation/misclassification model.";
+        endcomp;
+    run;
+
+    ods rtf close;
+
+%end;
+%else %put ERROR: Could not identify the required variables in MISCLASSIFICATION.;
+
+
+/****************************************************************************************
+ * 7. Probability of having visited each state by year 7
+ *
+ * The exported passage_7 object was filtered to the clinically relevant starting
+ * state before export. If from-state is still present, it is retained in the table.
+ ****************************************************************************************/
+
+%pickvar(data=passage_7, candidates=from_state|from_name|state, out=pass_from);
+%pickvar(data=passage_7, candidates=to_state|to_name|tostate, out=pass_to);
+%pickvar(data=passage_7, candidates=estimate|probability, out=pass_est);
+%pickvar(data=passage_7, candidates=conf.low|conf_low|lower|L, out=pass_lo);
+%pickvar(data=passage_7, candidates=conf.high|conf_high|upper|U, out=pass_hi);
+
+%if %length(%superq(pass_to)) and %length(%superq(pass_est)) %then %do;
+
+    data passage_report;
+        length from_c to_c $100 prob_c $60;
+        set passage_7;
+
+        %if %length(%superq(pass_from)) %then %do;
+            from_c = strip(vvalue(&pass_from.));
+        %end;
+        %else %do;
+            from_c = "CAV 0";
+        %end;
+
+        to_c = strip(vvalue(&pass_to.));
+
+        %if %length(%superq(pass_lo)) and %length(%superq(pass_hi)) %then %do;
+            prob_c = cats(
+                strip(put(&pass_est.,8.3)),
+                " (",
+                strip(put(&pass_lo.,8.3)),
+                "-",
+                strip(put(&pass_hi.,8.3)),
+                ")"
+            );
+        %end;
+        %else %do;
+            prob_c = strip(put(&pass_est.,8.3));
+        %end;
+    run;
+
+    data res.CAV_PASSAGE_7_DATA;
+        set passage_report;
+    run;
+
+    %make_title(
+        outbase=CAV_PASSAGE_7,
+        title=%str(Probability of having visited each state by 7 years for the reference Sahlgrenska patient),
+        orientation=portrait
+    );
+
+    %output_settings(orientation=portrait);
+
+    ods rtf
+        file="&goutpath.Table_CAV_PASSAGE_7_&rdat8..rtf"
+        style=styles.statistical
+        bodytitle;
+
+    proc report data=passage_report nowd missing
+        style(report)=[outputwidth=85% fontsize=1]
+        style(header)=[background=CXECEDEC just=c vjust=m font_weight=bold fontsize=1]
+        style(column)=[vjust=t fontsize=1];
+
+        columns from_c to_c prob_c;
+
+        define from_c /
+            group order=data "Starting state"
+            style(column)=[just=l cellwidth=4.5cm font_weight=bold];
+
+        define to_c /
+            display "State visited"
+            style(column)=[just=l cellwidth=4.5cm];
+
+        define prob_c /
+            display "Probability (95% CI)"
+            style(column)=[just=c cellwidth=4.0cm];
+
+        compute after /
+            style=[just=l background=CXECEDEC fontsize=1];
+            line "The probability is the probability of having visited the state at least once by year 7; it is not the probability of occupying that state exactly at year 7.";
+        endcomp;
+    run;
+
+    ods rtf close;
+
+%end;
+%else %put ERROR: Could not identify the required variables in PASSAGE_7.;
+
+
+/****************************************************************************************
+ * 8. Transition-intensity ratios at years 1, 3 and 6
+ ****************************************************************************************/
+
+%pickvar(data=ratio_136, candidates=year|time, out=rat_year);
+%pickvar(data=ratio_136, candidates=from_state|from_name|state, out=rat_from);
+%pickvar(data=ratio_136, candidates=comparison|contrast, out=rat_comp);
+%pickvar(data=ratio_136, candidates=estimate|ratio, out=rat_est);
+%pickvar(data=ratio_136, candidates=conf.low|conf_low|lower|L, out=rat_lo);
+%pickvar(data=ratio_136, candidates=conf.high|conf_high|upper|U, out=rat_hi);
+
+%if %length(%superq(rat_year)) and %length(%superq(rat_from)) and
+    %length(%superq(rat_comp)) and %length(%superq(rat_est)) %then %do;
+
+    data ratio_report;
+        length from_c comparison_c $150 ratio_c $60;
+        set ratio_136;
+
+        from_c       = strip(vvalue(&rat_from.));
+        comparison_c = strip(vvalue(&rat_comp.));
+
+        %if %length(%superq(rat_lo)) and %length(%superq(rat_hi)) %then %do;
+            ratio_c = cats(
+                strip(put(&rat_est.,8.2)),
+                " (",
+                strip(put(&rat_lo.,8.2)),
+                "-",
+                strip(put(&rat_hi.,8.2)),
+                ")"
+            );
+        %end;
+        %else %do;
+            ratio_c = strip(put(&rat_est.,8.2));
+        %end;
+    run;
+
+    proc sort data=ratio_report;
+        by &rat_year. from_c;
+    run;
+
+    data res.CAV_RATIO_136_DATA;
+        set ratio_report;
+    run;
+
+    %make_title(
+        outbase=CAV_RATIO_136,
+        title=%str(Transition-intensity ratios at 1, 3 and 6 years for the reference Sahlgrenska patient),
+        orientation=portrait
+    );
+
+    %output_settings(orientation=portrait);
+
+    ods rtf
+        file="&goutpath.Table_CAV_RATIO_136_&rdat8..rtf"
+        style=styles.statistical
+        bodytitle;
+
+    proc report data=ratio_report nowd missing
+        style(report)=[outputwidth=95% fontsize=1]
+        style(header)=[background=CXECEDEC just=c vjust=m font_weight=bold fontsize=1]
+        style(column)=[vjust=t fontsize=1];
+
+        columns &rat_year. from_c comparison_c ratio_c;
+
+        define &rat_year. /
+            group order=data "Year"
+            style(column)=[just=c cellwidth=1.5cm font_weight=bold];
+
+        define from_c /
+            group order=data "Current state"
+            style(column)=[just=l cellwidth=3.5cm];
+
+        define comparison_c /
+            display "Competing transitions"
+            style(column)=[just=l cellwidth=6.0cm];
+
+        define ratio_c /
+            display "Intensity ratio (95% CI)"
+            style(column)=[just=c cellwidth=4.0cm];
+
+        compute after /
+            style=[just=l background=CXECEDEC fontsize=1];
+            line "Ratios compare the instantaneous transition intensities at the stated landmark and reference covariate profile.";
+        endcomp;
+    run;
+
+    ods rtf close;
+
+%end;
+%else %put ERROR: Could not identify the required variables in RATIO_136.;
+
+
+/****************************************************************************************
+ * End
+ ****************************************************************************************/
+
+title;
+footnote;
+ods listing;
