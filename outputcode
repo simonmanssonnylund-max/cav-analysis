@@ -1685,48 +1685,76 @@ table4 <- eligible %>%
 # ==============================================================================
 # 15. SAP TABLE 6: ANGIOGRAPHY COVERAGE
 # ==============================================================================
+windows <- tibble(
+  timepoint = c("1 year", "3 years", "6 years"),
+  start = c(0.5, 2, 4),
+  end   = c(2, 4, 7)
+)
 
-table6_total <- eligible %>%
-  group_by(window) %>%
-  summarise(
-    n = sum(conclusive_angio),
-    N = n(),
-    percent = 100 * n / N,
-    .groups = "drop"
-  ) %>%
-  mutate(stratum_type = "Overall", stratum = "Total")
+coverage_by_center <- bind_rows(
+  lapply(seq_len(nrow(windows)), function(i) {
 
-table6_era <- eligible %>%
-  group_by(tx_era, window) %>%
-  summarise(
-    n = sum(conclusive_angio),
-    N = n(),
-    percent = 100 * n / N,
-    .groups = "drop"
-  ) %>%
-  transmute(
-    stratum_type = "Transplantation era",
-    stratum = as.character(tx_era),
-    window, n, N, percent
+    w <- windows[i, ]
+
+    # One row per patient
+    pats <- dat %>%
+      group_by(lopnr) %>%
+      summarise(
+        unit = first(unit),
+        death_time = if (any(state == 4)) {
+          min(years[state == 4])
+        } else {
+          Inf
+        },
+        .groups = "drop"
+      ) %>%
+      # Eligible if alive at start of window
+      filter(death_time > w$start)
+
+    # Patients with at least one real angiography in the window
+    angio_ids <- dat %>%
+      filter(
+        artificial == FALSE,
+        years > 0,
+        state %in% 0:3,
+        years >= w$start,
+        years < w$end
+      ) %>%
+      distinct(lopnr) %>%
+      pull(lopnr)
+
+    pats %>%
+      mutate(
+        angio = lopnr %in% angio_ids
+      ) %>%
+      group_by(unit) %>%
+      summarise(
+        eligible = n(),
+        angio = sum(angio),
+        no_angio = sum(!angio),
+        proportion = angio / eligible,
+        .groups = "drop"
+      ) %>%
+      mutate(
+        timepoint = w$timepoint,
+        window = paste0(w$start, "–<", w$end, " years")
+      )
+  })
+) %>%
+  select(
+    unit, timepoint, window,
+    eligible, angio, no_angio, proportion
   )
 
-table6_unit <- eligible %>%
-  group_by(unit, window) %>%
-  summarise(
-    n = sum(conclusive_angio),
-    N = n(),
-    percent = 100 * n / N,
-    .groups = "drop"
-  ) %>%
-  transmute(
-    stratum_type = "Transplantation center",
-    stratum = as.character(unit),
-    window, n, N, percent
+coverage_by_center
+
+coverage_by_center <- coverage_by_center %>%
+  mutate(
+    coverage = sprintf(
+      "%d/%d (%.1f%%)",
+      angio, eligible, 100 * proportion
+    )
   )
-
-table6 <- bind_rows(table6_total, table6_era, table6_unit) %>%
-  select(stratum_type, stratum, window, n, N, percent)
-
 # ==============================================================================
 # 16. SAP TABLE 7: WITH VS WITHOUT ANGIOGRAPHY, 0.5-<7 YEARS
 # ==============================================================================
