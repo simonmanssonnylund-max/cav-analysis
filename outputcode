@@ -1881,3 +1881,17 @@ message("Finished.")
 message("Output directory: ", OUT_DIR)
 message("Excel workbook: ", xlsx_file)
 message("Sahlgrenska prevalence figure saved as PDF and PNG.")
+
+
+
+
+
+fmt_p <- function(p) {
+  case_when(
+    is.na(p) ~ "",
+    p < 0.0001 ~ "p < .0001",
+    p < 0.01 ~ paste0("p = ", formatC(p, format = "f", digits = 4)),
+    p < 0.055 ~ paste0("p = ", formatC(p, format = "f", digits = 3)),
+    TRUE ~ paste0("p = ", formatC(p, format = "f", digits = 2))
+  )
+}
