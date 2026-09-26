@@ -1,3 +1,28 @@
+dsex_tab <- dat %>%
+  filter(years == 0) %>%
+  mutate(
+    reported = !is.na(dsex)
+  ) %>%
+  group_by(unit, tx_era) %>%
+  summarise(
+    reported = sum(reported),
+    total = n(),
+    prop = reported / total,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    `Reported / total` = paste0(reported, "/", total),
+    `Proportion reported` = sprintf("%.1f%%", 100 * prop)
+  ) %>%
+  select(
+    Unit = unit,
+    Era = tx_era,
+    `Reported / total`,
+    `Proportion reported`
+  )
+
+dsex_tab
+
 # ==============================================================================
 # CAV MULTI-STATE ANALYSIS: REPORTING TABLES AND FIGURES
 # ==============================================================================
