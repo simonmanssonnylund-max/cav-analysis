@@ -513,97 +513,84 @@ ods rtf close;
 /****************************************************************************************
  * 5. Transition probabilities at years 1, 3 and 6
  ****************************************************************************************/
+/****************************************************************************************
+ * Transition probabilities at years 1, 3 and 6
+ ****************************************************************************************/
 
 %macro make_p136_table;
 
-%pickvar(data=p_sahl_136, candidates=year|time, out=p_year);
-%pickvar(data=p_sahl_136, candidates=from_name|from_state|state, out=p_from);
-%pickvar(data=p_sahl_136, candidates=to_name|to_state|tostate, out=p_to);
-%pickvar(data=p_sahl_136, candidates=estimate|probability, out=p_est);
-%pickvar(data=p_sahl_136, candidates=conf.low|conf_low|lower|L, out=p_lo);
-%pickvar(data=p_sahl_136, candidates=conf.high|conf_high|upper|U, out=p_hi);
-
-%if %length(%superq(p_year)) and %length(%superq(p_from)) and
-    %length(%superq(p_to)) and %length(%superq(p_est)) %then %do;
-
-    data p136_report;
-        length from_c to_c $100 prob_c $60;
-        set p_sahl_136;
-
-        from_c = strip(vvalue(&p_from.));
-        to_c   = strip(vvalue(&p_to.));
-
-        %if %length(%superq(p_lo)) and %length(%superq(p_hi)) %then %do;
-            prob_c = cats(
-                strip(put(&p_est.,8.3)),
-                " (",
-                strip(put(&p_lo.,8.3)),
-                "-",
-                strip(put(&p_hi.,8.3)),
-                ")"
-            );
-        %end;
-        %else %do;
-            prob_c = strip(put(&p_est.,8.3));
-        %end;
-    run;
-
-    proc sort data=p136_report;
-        by &p_year. from_c to_c;
-    run;
-
     data res.CAV_P_136_DATA;
-        set p136_report;
+        set p_sahl_136;
     run;
 
     %make_title(
         outbase=CAV_P_136,
         title=%str(Latent-state transition probabilities at 1, 3 and 6 years for the reference Sahlgrenska patient),
-        orientation=portrait
+        orientation=landscape
     );
 
-    %output_settings(orientation=portrait);
+    %output_settings(orientation=landscape);
 
     ods rtf
         file="&goutpath.Table_CAV_P_136_&rdat8..rtf"
         style=styles.statistical
         bodytitle;
 
-    proc report data=p136_report nowd missing
-        style(report)=[outputwidth=95% fontsize=1]
-        style(header)=[background=CXECEDEC just=c vjust=m font_weight=bold fontsize=1]
-        style(column)=[vjust=t fontsize=1];
+    proc report data=p_sahl_136 nowd missing
+        style(report)=[outputwidth=100% fontsize=1]
+        style(header)=[background=CXECEDEC just=c vjust=m
+                       font_weight=bold fontsize=1]
+        style(column)=[vjust=m fontsize=1];
 
-        columns &p_year. from_c to_c prob_c;
+        columns
+            year
+            from_state
+            'CAV 0'n
+            'CAV 1'n
+            'CAV >=2'n
+            'Death/Re-HTx'n
+        ;
 
-        define &p_year. /
-            group order=data "Year"
+        define year /
+            group order=data
+            "Year"
             style(column)=[just=c cellwidth=1.5cm font_weight=bold];
 
-        define from_c /
-            group order=data "From state"
-            style(column)=[just=l cellwidth=4.0cm];
+        define from_state /
+            display
+            "From state"
+            style(column)=[just=l cellwidth=3.0cm];
 
-        define to_c /
-            display "To state"
-            style(column)=[just=l cellwidth=4.0cm];
+        define 'CAV 0'n /
+            display
+            "CAV 0"
+            style(column)=[just=c cellwidth=3.5cm];
 
-        define prob_c /
-            display "Probability (95% CI)"
-            style(column)=[just=c cellwidth=4.0cm];
+        define 'CAV 1'n /
+            display
+            "CAV 1"
+            style(column)=[just=c cellwidth=3.5cm];
+
+        define 'CAV >=2'n /
+            display
+            "CAV >=2"
+            style(column)=[just=c cellwidth=3.5cm];
+
+        define 'Death/Re-HTx'n /
+            display
+            "Death/Re-HTx"
+            style(column)=[just=c cellwidth=3.5cm];
 
         compute after /
             style=[just=l background=CXECEDEC fontsize=1];
-            line "Probabilities refer to the latent (true) multi-state process and therefore do not incorporate the observation misclassification matrix.";
+
+            line "Values are transition probabilities with 95% confidence intervals. "
+                 "Probabilities refer to the latent (true) multi-state process.";
         endcomp;
+
     run;
 
     ods rtf close;
-
-%end;
-%else %put ERROR: Could not identify the required variables in P_SAHL_136.;
-
-
 
 %mend make_p136_table;
 
