@@ -347,6 +347,45 @@ model_fit_stats <- tibble(
   minus2loglik = c(fit_unadj$minus2loglik, fit_adj$minus2loglik)
 )
 
+# ------------- Output the Sahlgrenska restricted model HRs, too ------------
+hr_sahl <- generics::tidy(fit_sahl) %>%
+  filter(parclass == "hr") %>%
+  mutate(
+    transition = case_when(
+      state == 1 & tostate == 2 ~ "CAV 0 → CAV 1",
+      state == 1 & tostate == 4 ~ "CAV 0 → Death / Re-HTx",
+      state == 2 & tostate == 3 ~ "CAV 1 → CAV ≥2",
+      state == 2 & tostate == 4 ~ "CAV 1 → Death / Re-HTx",
+      state == 3 & tostate == 4 ~ "CAV ≥2 → Death / Re-HTx"
+    ),
+    
+    covariate = case_when(
+      term == "age_diff"      ~ "Donor–recipient age difference",
+      term == "sex_diff1"     ~ "Donor–recipient sex difference",
+      term == "post_cutEarly" ~ "Early period (≤30 days)",
+      TRUE ~ term
+    ),
+    
+    `HR (95% CI)` = sprintf(
+      "%.2f (%.2f–%.2f)",
+      estimate, conf.low, conf.high
+    ),
+    
+    `p-value` = if_else(
+      p.value < 0.001,
+      "<0.001",
+      sprintf("%.3f", p.value)
+    )
+  ) %>%
+  select(
+    Transition = transition,
+    Covariate = covariate,
+    `HR (95% CI)`,
+    `p-value`
+  )
+
+hr_sahl
+
 # ==============================================================================
 # 5. MISCLASSIFICATION MATRIX
 # ==============================================================================
