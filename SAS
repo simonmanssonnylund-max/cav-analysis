@@ -1006,16 +1006,16 @@ ods listing;
 
 
 
-
+/**************************************************************************
+ * Cumulative incidence figure as PNG
+ * Includes:
+ *   - PCI CIF
+ *   - Death / Re-HTx CIF
+ *   - number at risk table below the plot
+ **************************************************************************/
 
 /**************************************************************************
- * Cumulative incidence of PCI
- * Competing event: Death / Re-HTx
- *
- * status:
- *   0 = Censored
- *   1 = PCI
- *   2 = Death / Re-HTx
+ * Project libraries / options
  **************************************************************************/
 
 libname org "&dataroot.\data\original";
@@ -1025,8 +1025,9 @@ libname res "&dataroot.\data\results";
 
 ods results;
 ods listing;
-footnote;
+
 title;
+footnote;
 
 options nofmterr;
 options mprint;
@@ -1058,9 +1059,7 @@ run;
 
 
 /**************************************************************************
- * Number at risk at 0, 1, ..., 7 years
- *
- * At risk at time t = no PCI, Death/Re-HTx, or censoring before t.
+ * Number at risk at years 0-7
  **************************************************************************/
 
 data risk_times;
@@ -1076,149 +1075,174 @@ proc sql;
         sum(b.time >= a.risk_time) as n_at_risk
     from risk_times as a,
          cif_dat as b
+    where not missing(b.time)
     group by a.risk_time
     order by a.risk_time;
 quit;
 
-/* Add a row label for PROC REPORT */
 data cif_risk;
-    length row_label $30;
+    length row_label $30 event $30;
     set cif_risk;
-    row_label = "Number at risk";
+    row_label = "At risk";
+
+    /* dummy variables so this can be combined with plot data */
+    time  = .;
+    cif   = .;
+    lcl   = .;
+    ucl   = .;
+    event = "";
 run;
 
 
 /**************************************************************************
- * Output settings
- **************************************************************************/
-
-options orientation=portrait;
-
-options nodate nonumber
-    leftmargin   = 2.5cm
-    rightmargin  = 2.5cm
-    topmargin    = 2.5cm
-    bottommargin = 2.5cm;
-
-ods escapechar="¤";
-
-ods graphics on /
-    reset=all
-    width=6.2in
-    height=4.2in
-    imagename="CIF_PCI";
-
-
-/**************************************************************************
- * Open RTF
- **************************************************************************/
-
-ods rtf
-    file="&goutpath.Figure_CIF_PCI_&rdat8..rtf"
-    style=styles.statistical
-    bodytitle;
-
-title "Cumulative incidence of PCI after first HTx";
-
-
-/**************************************************************************
- * CIF
+ * Get CIF estimates from PROC LIFETEST
  *
- * EVENTCODE=1:
- *   PCI is the event of interest.
- *   Status=2 is automatically treated as a competing event.
+ * First run: PCI as event of interest
+ * Second run: Death / Re-HTx as event of interest
  *
- * The ODS CIF table is also saved for later use.
+ * NOTE:
+ * Run PROC CONTENTS once on ci_pci_raw / ci_comp_raw if needed.
+ * In most SAS versions with OUTCIF=, the estimate variables are:
+ *   time, cif, cif_lcl, cif_ucl
  **************************************************************************/
-
-ods output CIF=res.CIF_PCI_ESTIMATES;
-
-/* Only display the actual CIF graph in the RTF */
-ods select cifPlot;
 
 proc lifetest
     data=cif_dat
-    plots=cif(cl)
-    timelist=1 3 6;
-
+    plots=none
+    outcif=ci_pci_raw;
     time time*status(0) / eventcode=1;
-
-    format status statusf.;
 run;
 
-ods select all;
-
-
-/**************************************************************************
- * At-risk table immediately below the CIF
- **************************************************************************/
-
-title;
-
-ods rtf text=
-    "¤S={font=('Arial',9pt,bold) just=l}Number at risk";
-
-proc report
-    data=cif_risk
-    nowd
-    missing
-    style(report)=[
-        outputwidth=6.2in
-        frame=void
-        rules=none
-        fontsize=1
-    ]
-    style(header)=[
-        background=white
-        just=c
-        font_weight=normal
-        fontsize=1
-    ]
-    style(column)=[
-        just=c
-        fontsize=1
-    ];
-
-    columns row_label risk_time,n_at_risk;
-
-    define row_label /
-        group
-        " "
-        style(column)=[
-            just=l
-            font_weight=bold
-            cellwidth=2.0cm
-        ];
-
-    define risk_time /
-        across
-        "Time since first HTx, years"
-        style(column)=[just=c];
-
-    define n_at_risk /
-        sum
-        " "
-        style(column)=[just=c];
-
+proc lifetest
+    data=cif_dat
+    plots=none
+    outcif=ci_comp_raw;
+    time time*status(0) / eventcode=2;
 run;
 
 
 /**************************************************************************
- * Figure note
+ * Standardise the two CIF datasets
+ *
+ * If your OUTCIF variable names differ, run:
+ *   proc contents data=ci_pci_raw; run;
+ *   proc contents data=ci_comp_raw; run;
+ * and adjust the assignments below.
  **************************************************************************/
 
-ods rtf text=
-    "¤S={font=('Arial',8pt) just=l}"
-    "PCI was considered the event of interest; death or Re-HTx was treated as a competing event. "
-    "Shaded limits represent pointwise 95% confidence intervals.";
+data ci_pci;
+    length event $30;
+    set ci_pci_raw;
+
+    /* Keep only rows with non-missing time/estimate */
+    if missing(time) then delete;
+
+    event = "PCI";
+
+    /* Adjust these names if PROC CONTENTS shows something different */
+    cif = cif;
+    lcl = cif_lcl;
+    ucl = cif_ucl;
+
+    keep time cif lcl ucl event;
+run;
+
+data ci_comp;
+    length event $30;
+    set ci_comp_raw;
+
+    if missing(time) then delete;
+
+    event = "Death / Re-HTx";
+
+    cif = cif;
+    lcl = cif_lcl;
+    ucl = cif_ucl;
+
+    keep time cif lcl ucl event;
+run;
 
 
 /**************************************************************************
- * Close output
+ * Combine plot data and risk-table data
  **************************************************************************/
 
-ods rtf close;
-ods graphics off;
+data cif_plot;
+    set ci_pci ci_comp cif_risk;
+run;
+
+
+/**************************************************************************
+ * PNG output settings
+ **************************************************************************/
+
+ods listing gpath="&dataroot.\data\results\";
+
+ods graphics / reset
+    imagename="Figure_CIF_PCI_with_competing_risk"
+    imagefmt=png
+    width=1800px
+    height=1400px
+    noborder;
+
+
+/**************************************************************************
+ * Plot
+ **************************************************************************/
+
+title "Cumulative incidence after first HTx";
+
+proc sgplot data=cif_plot noautolegend;
+
+    /* Optional confidence bands */
+    band x=time lower=lcl upper=ucl /
+        group=event
+        transparency=0.80
+        name="bands";
+
+    /* CIF step curves */
+    step x=time y=cif /
+        group=event
+        lineattrs=(thickness=2)
+        name="cif";
+
+    /* At-risk table below plot */
+    xaxistable n_at_risk /
+        x=risk_time
+        class=row_label
+        location=outside
+        valueattrs=(size=9)
+        labelattrs=(size=9 weight=bold)
+        title="Number at risk";
+
+    xaxis
+        label="Time since first HTx, years"
+        values=(0 to 7 by 1)
+        min=0
+        max=7;
+
+    yaxis
+        label="Cumulative incidence"
+        values=(0 to 1 by 0.1)
+        min=0
+        max=1;
+
+    keylegend "cif" /
+        title=""
+        location=inside
+        position=topleft
+        across=1;
+
+    inset
+        "PCI was treated as the event of interest and death / Re-HTx as the competing event."
+        "Shaded areas represent pointwise 95% confidence intervals."
+        /
+        position=bottomright
+        border
+        textattrs=(size=8);
+
+run;
 
 title;
 footnote;
+ods graphics off;
