@@ -989,3 +989,236 @@ ods rtf close;
 title;
 footnote;
 ods listing;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/**************************************************************************
+ * Cumulative incidence of PCI
+ * Competing event: Death / Re-HTx
+ *
+ * status:
+ *   0 = Censored
+ *   1 = PCI
+ *   2 = Death / Re-HTx
+ **************************************************************************/
+
+libname org "&dataroot.\data\original";
+libname cle "&dataroot.\data\cleaned";
+libname der "&dataroot.\data\derived";
+libname res "&dataroot.\data\results";
+
+ods results;
+ods listing;
+footnote;
+title;
+
+options nofmterr;
+options mprint;
+options varinitchk=error;
+
+
+/**************************************************************************
+ * Import patient-level CIF data
+ **************************************************************************/
+
+proc import
+    datafile="&dataroot.\data\Derived\cif_data.xlsx"
+    dbms=xlsx
+    out=cif_dat
+    replace;
+run;
+
+
+/**************************************************************************
+ * Formats
+ **************************************************************************/
+
+proc format;
+    value statusf
+        0 = "Censored"
+        1 = "PCI"
+        2 = "Death / Re-HTx";
+run;
+
+
+/**************************************************************************
+ * Number at risk at 0, 1, ..., 7 years
+ *
+ * At risk at time t = no PCI, Death/Re-HTx, or censoring before t.
+ **************************************************************************/
+
+data risk_times;
+    do risk_time = 0 to 7 by 1;
+        output;
+    end;
+run;
+
+proc sql;
+    create table cif_risk as
+    select
+        a.risk_time,
+        sum(b.time >= a.risk_time) as n_at_risk
+    from risk_times as a,
+         cif_dat as b
+    group by a.risk_time
+    order by a.risk_time;
+quit;
+
+/* Add a row label for PROC REPORT */
+data cif_risk;
+    length row_label $30;
+    set cif_risk;
+    row_label = "Number at risk";
+run;
+
+
+/**************************************************************************
+ * Output settings
+ **************************************************************************/
+
+options orientation=portrait;
+
+options nodate nonumber
+    leftmargin   = 2.5cm
+    rightmargin  = 2.5cm
+    topmargin    = 2.5cm
+    bottommargin = 2.5cm;
+
+ods escapechar="¤";
+
+ods graphics on /
+    reset=all
+    width=6.2in
+    height=4.2in
+    imagename="CIF_PCI";
+
+
+/**************************************************************************
+ * Open RTF
+ **************************************************************************/
+
+ods rtf
+    file="&goutpath.Figure_CIF_PCI_&rdat8..rtf"
+    style=styles.statistical
+    bodytitle;
+
+title "Cumulative incidence of PCI after first HTx";
+
+
+/**************************************************************************
+ * CIF
+ *
+ * EVENTCODE=1:
+ *   PCI is the event of interest.
+ *   Status=2 is automatically treated as a competing event.
+ *
+ * The ODS CIF table is also saved for later use.
+ **************************************************************************/
+
+ods output CIF=res.CIF_PCI_ESTIMATES;
+
+/* Only display the actual CIF graph in the RTF */
+ods select cifPlot;
+
+proc lifetest
+    data=cif_dat
+    plots=cif(cl)
+    timelist=1 3 6;
+
+    time time*status(0) / eventcode=1;
+
+    format status statusf.;
+run;
+
+ods select all;
+
+
+/**************************************************************************
+ * At-risk table immediately below the CIF
+ **************************************************************************/
+
+title;
+
+ods rtf text=
+    "¤S={font=('Arial',9pt,bold) just=l}Number at risk";
+
+proc report
+    data=cif_risk
+    nowd
+    missing
+    style(report)=[
+        outputwidth=6.2in
+        frame=void
+        rules=none
+        fontsize=1
+    ]
+    style(header)=[
+        background=white
+        just=c
+        font_weight=normal
+        fontsize=1
+    ]
+    style(column)=[
+        just=c
+        fontsize=1
+    ];
+
+    columns row_label risk_time,n_at_risk;
+
+    define row_label /
+        group
+        " "
+        style(column)=[
+            just=l
+            font_weight=bold
+            cellwidth=2.0cm
+        ];
+
+    define risk_time /
+        across
+        "Time since first HTx, years"
+        style(column)=[just=c];
+
+    define n_at_risk /
+        sum
+        " "
+        style(column)=[just=c];
+
+run;
+
+
+/**************************************************************************
+ * Figure note
+ **************************************************************************/
+
+ods rtf text=
+    "¤S={font=('Arial',8pt) just=l}"
+    "PCI was considered the event of interest; death or Re-HTx was treated as a competing event. "
+    "Shaded limits represent pointwise 95% confidence intervals.";
+
+
+/**************************************************************************
+ * Close output
+ **************************************************************************/
+
+ods rtf close;
+ods graphics off;
+
+title;
+footnote;
