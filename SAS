@@ -888,6 +888,101 @@ ods rtf close;
 %make_ratio136_table;
 
 /****************************************************************************************
+ * Make followup table
+ ****************************************************************************************/
+options validvarname=any;
+
+/* Example import */
+proc import
+    datafile="&dataroot.\data\Derived\your_file.xlsx"
+    dbms=xlsx
+    out=summary_wide
+    replace;
+run;
+
+
+/* Get variables in their original column order */
+proc contents
+    data=summary_wide
+    out=__vars(keep=name label varnum)
+    noprint;
+run;
+
+proc sort data=__vars;
+    by varnum;
+run;
+
+
+/* Convert the one-row wide dataset to a vertical table */
+data summary_table;
+    length Variable $300 Value $300 varname $32;
+
+    /* Load the single row containing the values */
+    if _n_ = 1 then
+        set summary_wide(obs=1);
+
+    do until(lastvar);
+        set __vars(rename=(name=varname)) end=lastvar;
+
+        /* Use Excel header/label as the displayed variable name */
+        if not missing(label) then
+            Variable = strip(label);
+        else
+            Variable = strip(varname);
+
+        /* Formatted value regardless of original variable type */
+        Value = strip(vvaluex(varname));
+
+        output;
+    end;
+
+    keep Variable Value;
+    stop;
+run;
+
+options orientation=portrait;
+options nodate nonumber
+    leftmargin   = 2.5cm
+    rightmargin  = 2.5cm
+    topmargin    = 2.5cm
+    bottommargin = 2.5cm;
+
+ods rtf
+    file="&goutpath.Table_patient_summary_&rdat8..rtf"
+    style=styles.statistical
+    bodytitle;
+
+title "Patient characteristics and follow-up";
+
+proc report data=summary_table nowd
+    style(report)=[outputwidth=90% fontsize=1]
+    style(header)=[
+        background=CXECEDEC
+        just=c
+        vjust=m
+        font_weight=bold
+        fontsize=1
+    ]
+    style(column)=[fontsize=1 vjust=m];
+
+    columns Variable Value;
+
+    define Variable /
+        display
+        "Characteristic"
+        style(column)=[just=l cellwidth=10cm];
+
+    define Value /
+        display
+        "Value"
+        style(column)=[just=c cellwidth=5cm];
+
+run;
+
+ods rtf close;
+
+
+/****************************************************************************************
  * End
  ****************************************************************************************/
 
