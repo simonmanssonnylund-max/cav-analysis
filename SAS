@@ -1246,3 +1246,112 @@ run;
 title;
 footnote;
 ods graphics off;
+
+
+
+
+
+
+
+/**************************************************************************
+ * PCI cumulative incidence at years 1-7
+ **************************************************************************/
+
+data pci_years;
+    do year = 1 to 7;
+        output;
+    end;
+run;
+
+
+/* Find the latest CIF estimate at or before each landmark year */
+proc sql;
+    create table pci_incidence_1_7 as
+    select
+        a.year,
+        b.cif,
+        b.lcl,
+        b.ucl
+    from pci_years as a
+
+    left join ci_pci as b
+        on b.time = (
+            select max(c.time)
+            from ci_pci as c
+            where c.time <= a.year
+        )
+
+    order by a.year;
+quit;
+
+
+/* Make report-ready percentage */
+data pci_incidence_1_7;
+    length incidence_ci $40;
+    set pci_incidence_1_7;
+
+    incidence_ci = cats(
+        strip(put(100*cif, 6.1)),
+        "% (",
+        strip(put(100*lcl, 6.1)),
+        "%-",
+        strip(put(100*ucl, 6.1)),
+        "%)"
+    );
+run;
+
+
+/* Save underlying table */
+data res.PCI_CIF_1_7_DATA;
+    set pci_incidence_1_7;
+run;
+
+
+/**************************************************************************
+ * RTF table
+ **************************************************************************/
+
+options orientation=portrait;
+
+ods rtf
+    file="&goutpath.Table_PCI_CIF_1_7_&rdat8..rtf"
+    style=styles.statistical
+    bodytitle;
+
+title "Cumulative incidence of PCI after first HTx";
+
+proc report data=pci_incidence_1_7 nowd
+    style(report)=[outputwidth=10cm fontsize=1]
+    style(header)=[
+        background=CXECEDEC
+        just=c
+        vjust=m
+        font_weight=bold
+        fontsize=1
+    ]
+    style(column)=[
+        vjust=m
+        fontsize=1
+    ];
+
+    columns year incidence_ci;
+
+    define year /
+        display
+        "Year"
+        style(column)=[just=c cellwidth=2.5cm];
+
+    define incidence_ci /
+        display
+        "Cumulative incidence (95% CI)"
+        style(column)=[just=c cellwidth=5.5cm];
+
+    compute after;
+        line "Death or Re-HTx was treated as a competing event.";
+    endcomp;
+
+run;
+
+ods rtf close;
+
+title;
