@@ -1354,4 +1354,70 @@ run;
 
 ods rtf close;
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+/* JOINT PCI/ANGIO CIF CODE */
+proc sgplot data=cif_plot noautolegend;
+
+    band x=time lower=lcl upper=ucl /
+        group=event_label
+        nomissinggroup
+        transparency=0.80;
+
+    step x=time y=cif /
+        group=event_label
+        nomissinggroup
+        lineattrs=(thickness=3)
+        name="cif";
+
+    /* At-risk table inside the figure, below y = 0 */
+    xaxistable n_at_risk /
+        x=risk_time
+        class=row_label
+        location=inside
+        valueattrs=(size=11)
+        labelattrs=(size=11 weight=bold);
+
+    xaxis
+        label="Time since first HTx, years"
+        values=(0 to 7 by 1)
+        min=0
+        max=7
+        valueattrs=(size=12)
+        labelattrs=(size=13 weight=bold);
+
+    yaxis
+        label="Cumulative incidence"
+        values=(0 to 0.30 by 0.05)
+        min=0
+        max=0.30
+
+        /* Creates blank space below the 0 tick for the risk table */
+        offsetmin=0.15
+
+        valueattrs=(size=12)
+        labelattrs=(size=13 weight=bold)
+        grid;
+
+    /* Legend below everything */
+    keylegend "cif" /
+        title=""
+        location=outside
+        position=bottom
+        across=2
+        valueattrs=(size=11);
+
+run;
+
 title;
