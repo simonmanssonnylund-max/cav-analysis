@@ -1,0 +1,206 @@
+# 2. Define the table structure
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+row_def <- tribble(
+  ~row_id,    ~section,                ~row_order, ~label,                          ~indent,
+
+  "n_start",  "Patients and follow-up", 1,         "Patients at start of period, N", 0,
+  "age",      "Patients and follow-up", 2,         "Age at start, median (IQR)",     0,
+  "male",     "Patients and follow-up", 3,         "Male sex, n (%)",               0,
+  "fu",       "Patients and follow-up", 4,         "Follow-up years, median (IQR)", 0,
+  "py",       "Patients and follow-up", 5,         "Total patient years",           0,
+  "death",    "Patients and follow-up", 6,         "Death during period, n (%)",    1,
+  "retx",     "Patients and follow-up", 7,         "Re-HTx",                        1,
+
+  "angio",    "Coronary angiography",   8,         "Total angiographies, n",        0,
+  "concl",    "Coronary angiography",   9,         "Conclusive, n",                 0,
+
+  "pci",      "Treatment: PCI",        10,         "Total PCI procedures, n",       0
+)
+
+# 3. Calculate the statistics
+# I would calculate the statistics for each follow-up period separately.
+# For illustration, suppose data_0_7 contains one row per patient in the first period.
+Follow-up 0–<7 years
+First calculate the values you need:
+
+
+# Patient counts
+n_start <- nrow(data_0_7)
+
+n_male <- sum(data_0_7$sex == "Male", na.rm = TRUE)
+
+n_sex <- sum(!is.na(data_0_7$sex))
+
+n_death <- sum(data_0_7$end_reason == "Death", na.rm = TRUE)
+
+# Age quartiles
+age_q <- quantile(
+  data_0_7$age,
+  probs = c(0.25, 0.50, 0.75),
+  na.rm = TRUE
+)
+
+Then assemble the results into a tibble.
+results_0_7 <- tibble(
+  row_id = c(
+    "n_start",
+    "age",
+    "male",
+    "death"
+  ),
+
+  display = c(
+    as.character(n_start),
+
+    sprintf("%.1f (%.1f-%.1f)",
+            age_q[2], age_q[1], age_q[3]),
+
+    sprintf("%d (%.1f%%)",
+            n_male, 100 * n_male / n_sex),
+
+    sprintf("%d (%.1f%%)",
+            n_death, 100 * n_death / n_start)
+  ),
+
+  period = "p0_7"
+)
+
+Importantly, you don't need to calculate everything at once. You can gradually add statistics to this tibble as you work.
+For the other two periods, do the equivalent:
+
+# Follow-up >=7 years
+results_ge7 <- tibble(
+  row_id = c(...),
+  display = c(...),
+  period = "ge7"
+)
+
+# Entire follow-up
+results_entire <- tibble(
+  row_id = c(...),
+  display = c(...),
+  period = "entire"
+)
+
+I would also retain the underlying numerical results, such as counts and denominators, in the corresponding calculation objects or additional columns, rather than relying exclusively on the formatted strings.
+
+
+
+
+4. Assemble the table
+This part is straightforward and doesn't need to change when you add statistics.
+First, combine the three datasets:
+
+results_long <- bind_rows(
+  results_0_7,
+  results_ge7,
+  results_entire
+)
+
+Then convert to wide format:
+results_wide <- results_long %>%
+  select(row_id, period, display) %>%
+  pivot_wider(
+    names_from = period,
+    values_from = display
+  )
+
+Finally, join the results to the predefined table structure:
+table_final <- row_def %>%
+  left_join(results_wide, by = "row_id") %>%
+  arrange(row_order) %>%
+  mutate(
+    across(c(p0_7, ge7, entire), ~replace_na(.x, ""))
+  )
+
+This is important: because you're using left_join() with row_def on the left, all predefined characteristics remain in the table, even if you haven't computed their values yet.
+You can therefore build the table incrementally.
+
+
+6. My suggestion for organizing your actual script
+I'd use the following overall layout:
+
+# ============================================================
+# 1. PREPARE DATA
+# ============================================================
+
+# Define follow-up periods
+# Create necessary patient-level and procedure-level datasets
+
+
+# ============================================================
+# 2. DEFINE TABLE STRUCTURE
+# ============================================================
+
+row_def <- tribble(
+  ...
+)
+
+
+# ============================================================
+# 3. COMPUTE STATISTICS
+# ============================================================
+
+# 3.1 Follow-up 0-<7 years
+
+# Compute statistics...
+
+results_0_7 <- tibble(
+  ...
+)
+
+
+# 3.2 Follow-up >=7 years
+
+# Compute statistics...
+
+results_ge7 <- tibble(
+  ...
+)
+
+
+# 3.3 Entire follow-up
+
+# Compute statistics...
+
+results_entire <- tibble(
+  ...
+)
+
+
+# ============================================================
+# 4. ASSEMBLE TABLE
+# ============================================================
+
+results_long <- bind_rows(
+  results_0_7,
+  results_ge7,
+  results_entire
+)
+
+results_wide <- results_long %>%
+  select(row_id, period, display) %>%
+  pivot_wider(
+    names_from = period,
+    values_from = display
+  )
+
+table_final <- row_def %>%
+  left_join(results_wide, by = "row_id") %>%
+  arrange(row_order)
+
+
+# ============================================================
+# 5. EXPORT TO SAS
+# ============================================================
+
+write.csv(
+  table_final,
+  "table_patient_followup.csv",
+  row.names = FALSE,
+  na = ""
+)
