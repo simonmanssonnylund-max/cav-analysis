@@ -1,0 +1,41 @@
+library(dplyr)
+library(purrr)
+
+calculate_ARR <- function(data, exposure) {
+
+  data <- data %>%
+    mutate(tde = .data[[exposure]])
+
+  map_dfr(c("cases", "controls"), function(grp) {
+
+    dat <- filter(data, group == grp)
+
+    fit <- glm(
+      event ~ tde,
+      offset = log(person_time),
+      family = poisson(link = "log"),
+      data = dat
+    )
+
+    RR <- exp(coef(fit)["tde"])
+    pd <- mean(dat$tde[dat$event == 1], na.rm = TRUE)
+    PAF <- pd * (RR - 1) / RR
+
+    tibble(
+      Outcome  = "MACE",
+      Exposure = exposure,
+      Group    = ifelse(grp == "cases", "Cases", "Controls"),
+      RR       = as.numeric(RR),
+      pd       = pd,
+      PAF      = as.numeric(PAF)
+    )
+  })
+}
+
+# Calculate for all three exposures
+ARR_table <- map_dfr(
+  c("Hypertension", "Diabetes", "Dyslipidemia"),
+  ~ calculate_ARR(data, .x)
+)
+
+ARR_table
