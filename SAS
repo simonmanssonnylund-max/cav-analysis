@@ -1444,40 +1444,25 @@ mathis sucks
 
 
 library(dplyr)
+library(dplyr)
 library(gridExtra)
 library(grid)
 library(gtable)
 
-# ============================================================
-# 1. ORDER OBSERVATIONS
-# ============================================================
-
+# Sort observations
 out <- out %>%
   ungroup() %>%
   arrange(lopnr, angio_date, desc(from_strax))
 
-
-# ============================================================
-# 2. IDENTIFY DECREASES IN CAV PROXY
-# ============================================================
-
+# Identify decreases
 decreases <- out %>%
   filter(!is.na(cav_proxy)) %>%
   group_by(lopnr) %>%
-  mutate(
-    previous_cav = lag(cav_proxy)
-  ) %>%
-  filter(
-    !is.na(previous_cav),
-    cav_proxy < previous_cav
-  ) %>%
+  mutate(previous_cav = lag(cav_proxy)) %>%
+  filter(!is.na(previous_cav), cav_proxy < previous_cav) %>%
   ungroup()
 
-
-# ============================================================
-# 3. SUMMARISE TRANSITION TYPES
-# ============================================================
-
+# Summarise transitions
 transition_summary <- decreases %>%
   group_by(previous_cav, cav_proxy) %>%
   summarise(
@@ -1487,134 +1472,170 @@ transition_summary <- decreases %>%
   ) %>%
   arrange(desc(previous_cav), cav_proxy)
 
-# Overall counts
-n_patients <- n_distinct(decreases$lopnr)
-n_decreases <- nrow(decreases)
-
-
-# ============================================================
-# 4. CREATE SUMMARY TEXT
-# ============================================================
-
 summary_lines <- c(
-  "SUMMARY OF DECREASES IN CAV PROXY",
-  "",
-  sprintf("Patients with decreases: %d", n_patients),
-  sprintf("Total decreases: %d", n_decreases),
+  "Summary of decreases in CAV proxy",
+  sprintf("Patients with decreases: %d", n_distinct(decreases$lopnr)),
+  sprintf("Total decreases: %d", nrow(decreases)),
   "",
   "Transitions (occurrences; unique patients):",
-  sprintf(
-    "  %s -> %s: %d occurrences (%d patients)",
-    transition_summary$previous_cav,
-    transition_summary$cav_proxy,
-    transition_summary$n,
-    transition_summary$n_patients
-  )
+  if(nrow(transition_summary) > 0)
+    sprintf(
+      "%s -> %s: %d occurrences (%d patients)",
+      transition_summary$previous_cav,
+      transition_summary$cav_proxy,
+      transition_summary$n,
+      transition_summary$n_patients
+    ) else "None"
 )
 
 summary_grob <- textGrob(
   paste(summary_lines, collapse = "\n"),
-  x = 0.01,
-  y = 0.98,
+  x = unit(0.1, "in"),
+  y = unit(1, "npc") - unit(0.1, "in"),
   just = c("left", "top"),
-  gp = gpar(
-    fontsize = 11,
-    fontfamily = "Aptos"
-  )
+  gp = gpar(fontsize = 11, fontfamily = "sans")
 )
 
-
-# ============================================================
-# 5. CREATE PATIENT-LEVEL TABLE
-# ============================================================
+# Divide observations into blocks of five patients
+patient_number <- match(out$lopnr, unique(out$lopnr))
+block_id <- ceiling(patient_number / 5)
+block_rows <- split(seq_len(nrow(out)), block_id)
 
 row_height <- 0.25
 
-tbl <- tableGrob(
-  out,
-  rows = NULL,
-  theme = ttheme_minimal(
-    base_size = 9,
-    base_family = "Aptos"
+# Create a table for each block, repeating column headers
+make_block <- function(idx) {
+
+  dat <- out[idx, , drop = FALSE]
+
+  tbl <- tableGrob(
+    dat,
+    rows = NULL,
+    theme = ttheme_minimal(
+      base_size = 9,
+      base_family = "sans"
+    )
   )
+
+  tbl$heights <- unit(
+    rep(row_height, length(tbl$heights)),
+    "in"
+  )
+
+  # Add lines between patients
+  patient_starts <- which(!duplicated(dat$lopnr))[-1]
+
+  for(i in patient_starts) {
+    tbl <- gtable_add_grob(
+      tbl,
+      grobs = segmentsGrob(
+        x0 = unit(0, "npc"),
+        x1 = unit(1, "npc"),
+        y0 = unit(1, "npc"),
+        y1 = unit(1, "npc"),
+        gp = gpar(col = "grey30", lwd = 2)
+      ),
+      t = i + 1,
+      l = 1,
+      r = length(tbl$widths),
+      clip = "off"
+    )
+  }
+
+  tbl
+}
+
+blocks <- lapply(block_rows, make_block)
+
+# Give all blocks identical column widths
+common_widths <- Reduce(
+  unit.pmax,
+  lapply(blocks, function(x) x$widths)
 )
 
-# Set consistent row heights
-tbl$heights <- unit(
-  rep(row_height, length(tbl$heights)),
-  "in"
+blocks <- lapply(blocks, function(x) {
+  x$widths <- common_widths
+  x
+})
+
+# Split blocks between two columns, balancing height
+block_heights <- vapply(
+  blocks,
+  function(x) length(x$heights) * row_height,
+  numeric(1)
 )
 
+n_blocks <- length(blocks)
 
-# ============================================================
-# 6. ADD HORIZONTAL LINES BETWEEN PATIENTS
-# ============================================================
+split_at <- if(n_blocks == 1) {
+  1L
+} else {
+  which.min(abs(
+    cumsum(block_heights)[-n_blocks] -
+      sum(block_heights) / 2
+  ))
+}
 
-# Identify first observation of each new patient
-patient_starts <- which(!duplicated(out$lopnr))[-1]
+left_idx <- seq_len(split_at)
+right_idx <- setdiff(seq_len(n_blocks), left_idx)
 
-for (i in patient_starts) {
+# Stack blocks vertically within each column
+make_column <- function(idx) {
+  if(length(idx) == 0) return(nullGrob())
 
-  tbl <- gtable_add_grob(
-    tbl,
-    grobs = segmentsGrob(
-      x0 = unit(0, "npc"),
-      x1 = unit(1, "npc"),
-      y0 = unit(1, "npc"),
-      y1 = unit(1, "npc"),
-      gp = gpar(
-        col = "grey30",
-        lwd = 2
-      )
-    ),
-    t = i + 1,
-    b = i + 1,
-    l = 1,
-    r = length(tbl$widths),
-    clip = "off"
+  arrangeGrob(
+    grobs = blocks[idx],
+    ncol = 1,
+    heights = unit(block_heights[idx], "in")
   )
 }
 
+left_col <- make_column(left_idx)
+right_col <- make_column(right_idx)
 
-# ============================================================
-# 7. COMBINE SUMMARY AND TABLE
-# ============================================================
+left_height <- sum(block_heights[left_idx])
+right_height <- sum(block_heights[right_idx])
+panel_height <- max(left_height, right_height)
 
-summary_height <- max(
-  1.5,
-  0.22 * length(summary_lines)
+panel_width <- convertWidth(
+  sum(common_widths), "in", valueOnly = TRUE
+) + 0.2
+
+# Place the columns side by side
+panels <- arrangeGrob(
+  left_col, right_col,
+  ncol = 2,
+  widths = unit(rep(panel_width, 2), "in"),
+  heights = unit(panel_height, "in")
 )
 
-table_height <- row_height * (nrow(out) + 1)
+# Add summary above both columns
+summary_height <- max(1.5, 0.23 * length(summary_lines))
 
 final_tbl <- arrangeGrob(
   summary_grob,
-  tbl,
+  panels,
   ncol = 1,
   heights = unit(
-    c(summary_height, table_height),
+    c(summary_height, panel_height),
     "in"
   )
 )
 
+# Export image
+total_width <- 2 * panel_width
+total_height <- summary_height + panel_height
 
-# ============================================================
-# 8. EXPORT AS ONE LONG PNG
-# ============================================================
+dpi <- min(100, floor(45000 / max(total_width, total_height)))
 
-total_height <- summary_height + table_height
-
-# Keep image dimensions below the graphics device's limit
-dpi <- min(100, floor(45000 / total_height))
-
-if (dpi < 60) {
-  stop("Image too long for a readable single PNG.")
+if(dpi < 50) {
+  stop("Image too large for a readable PNG; consider PDF.")
 }
 
 ggplot2::ggsave(
   "desc_patients_20261020.png",
   plot = final_tbl,
-  width = max(12, 1.1 * ncol(out)),
+  width = total_width,
   height = total_height,
   units = "in",
   dpi = dpi,
