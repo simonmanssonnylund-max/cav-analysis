@@ -1,0 +1,322 @@
+library(dplyr)
+library(tidyr)
+
+# 1. Prepare datasets
+
+scaar <- test2.6 %>%
+  filter(from_strax == 0) %>%
+  transmute(
+    lopnr = as.character(lopnr),
+    angio_date = as.Date(angio_date),
+    event, angio_fynd, cav_proxy
+  )
+
+seg <- scaar_segments %>%
+  transmute(
+    lopnr = as.character(LopNr),
+    pseudo_MCEID, pseudo_SID,
+    angio_date = as.Date(INTERDAT),
+    SEGMENT = as.integer(as.character(SEGMENT)),
+    FINDING = as.integer(as.character(FINDING))
+  )
+
+keys <- c("lopnr", "angio_date")
+
+# Check missing identifiers and dates
+scaar %>%
+  summarise(
+    missing_id = sum(is.na(lopnr)),
+    missing_date = sum(is.na(angio_date))
+  )
+
+seg %>%
+  summarise(
+    missing_id = sum(is.na(lopnr)),
+    missing_date = sum(is.na(angio_date)),
+    missing_segment = sum(is.na(SEGMENT))
+  )
+
+# Check duplicate patient-date combinations in test2.6
+scaar %>%
+  count(lopnr, angio_date) %>%
+  filter(n > 1)
+
+# Check validity of segment and stenosis codes
+seg %>%
+  filter(
+    (!is.na(SEGMENT) & !SEGMENT %in% 1:20) |
+    (!is.na(FINDING) & !FINDING %in% 0:6)
+  )
+
+
+# 2. Compare angiography dates between datasets
+
+scaar_dates <- scaar %>%
+  distinct(lopnr, angio_date)
+
+seg_dates <- seg %>%
+  distinct(lopnr, angio_date)
+
+# Exact patient-date matches
+matched_dates <- inner_join(
+  scaar_dates, seg_dates, by = keys
+)
+
+# Registrations found only in test2.6
+only_scaar <- anti_join(
+  scaar_dates, seg_dates, by = keys
+)
+
+# Registrations found only in the segment dataset
+only_segments <- anti_join(
+  seg_dates, scaar_dates, by = keys
+)
+
+# Overview
+date_comparison <- tibble(
+  source = c("test2.6", "Segment data"),
+  n_angios = c(nrow(scaar_dates), nrow(seg_dates)),
+  n_matched = nrow(matched_dates),
+  pct_matched = 100 * n_matched / n_angios
+)
+
+date_comparison
+
+# Examine unmatched dates
+only_scaar
+only_segments
+
+# Compare patient identifiers independently of dates
+tibble(
+  n_patients_scaar = n_distinct(scaar$lopnr),
+  n_patients_segments = n_distinct(seg$lopnr),
+  n_patients_both = length(intersect(
+    unique(scaar$lopnr), unique(seg$lopnr)
+  ))
+)
+
+
+# 3. Investigate nearby dates for unmatched examinations
+
+# Find potential matches within 30 days for the same patient
+nearby_dates <- only_scaar %>%
+  inner_join(
+    seg_dates %>% rename(segment_date = angio_date),
+    by = "lopnr",
+    relationship = "many-to-many"
+  ) %>%
+  mutate(
+    date_difference = as.integer(segment_date - angio_date)
+  ) %>%
+  filter(abs(date_difference) <= 30) %>%
+  group_by(lopnr, angio_date) %>%
+  slice_min(abs(date_difference), n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+nearby_dates %>%
+  count(date_difference, sort = TRUE)
+
+nearby_dates %>%
+  arrange(lopnr, angio_date)
+
+
+# 4. Summarise segment information per angiography
+
+seg_angio <- seg %>%
+  group_by(lopnr, angio_date) %>%
+  summarise(
+    n_rows = n(),
+    n_segments = n_distinct(SEGMENT, na.rm = TRUE),
+
+    n_segments_with_finding = n_distinct(
+      SEGMENT[!is.na(FINDING)], na.rm = TRUE
+    ),
+
+    n_segments_coded = n_distinct(
+      SEGMENT[FINDING %in% 1:6], na.rm = TRUE
+    ),
+
+    n_segments_ge50 = n_distinct(
+      SEGMENT[FINDING %in% 3:6], na.rm = TRUE
+    ),
+
+    n_segments_ge70 = n_distinct(
+      SEGMENT[FINDING %in% 4:6], na.rm = TRUE
+    ),
+
+    n_code0 = sum(FINDING %in% 0),
+
+    n_MCEID = n_distinct(pseudo_MCEID, na.rm = TRUE),
+    n_SID = n_distinct(pseudo_SID, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Distribution of number of segments per angiography
+seg_angio %>%
+  count(n_segments, name = "n_angios") %>%
+  arrange(n_segments)
+
+# Number of segments with an actual stenosis code
+seg_angio %>%
+  count(n_segments_coded, name = "n_angios") %>%
+  arrange(n_segments_coded)
+
+# Summary
+seg_angio %>%
+  summarise(
+    n_angios = n(),
+    median_segments = median(n_segments),
+    q1 = quantile(n_segments, 0.25),
+    q3 = quantile(n_segments, 0.75),
+    n_all20 = sum(n_segments == 20),
+    pct_all20 = 100 * mean(n_segments == 20),
+    n_any_coded = sum(n_segments_coded > 0),
+    pct_any_coded = 100 * mean(n_segments_coded > 0)
+  )
+
+# Investigate how examination identifiers are distributed
+seg_angio %>%
+  count(n_MCEID, n_SID, sort = TRUE)
+
+# Multiple registrations of the same segment on one date
+duplicate_segments <- seg %>%
+  group_by(lopnr, angio_date, SEGMENT) %>%
+  summarise(
+    n = n(),
+    n_different_findings = n_distinct(FINDING, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  filter(n > 1)
+
+duplicate_segments
+
+
+# 5. Compare segment completeness with overall findings
+
+comparison <- scaar %>%
+  left_join(seg_angio, by = keys)
+
+# Availability of segment data by angiographic finding
+completeness_by_fynd <- comparison %>%
+  group_by(angio_fynd) %>%
+  summarise(
+    n_angios = n(),
+    n_with_segments = sum(!is.na(n_segments)),
+    pct_with_segments = 100 * mean(!is.na(n_segments)),
+    median_n_segments = if(all(is.na(n_segments))) {
+      NA_real_
+    } else {
+      median(n_segments, na.rm = TRUE)
+    },
+    n_with_ge50 = sum(n_segments_ge50 > 0, na.rm = TRUE),
+    n_with_ge70 = sum(n_segments_ge70 > 0, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+completeness_by_fynd
+
+# Same analysis by event type
+comparison %>%
+  group_by(event, angio_fynd) %>%
+  summarise(
+    n = n(),
+    n_with_segments = sum(!is.na(n_segments)),
+    pct_with_segments = 100 * mean(!is.na(n_segments)),
+    .groups = "drop"
+  )
+
+# Frequency of each stenosis code
+seg %>%
+  count(FINDING, sort = TRUE)
+
+# Frequency with which each coronary segment is registered
+segment_summary <- seg %>%
+  group_by(SEGMENT) %>%
+  summarise(
+    n_rows = n(),
+    n_angios = n_distinct(paste(lopnr, angio_date)),
+    n_coded = sum(FINDING %in% 1:6),
+    n_ge50 = sum(FINDING %in% 3:6),
+    n_ge70 = sum(FINDING %in% 4:6),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    pct_angios = 100 * n_angios / nrow(seg_angio)
+  ) %>%
+  arrange(SEGMENT)
+
+segment_summary
+
+# Potential inconsistency: normal/atheroma despite >=50% stenosis
+potential_discrepancies <- comparison %>%
+  filter(
+    angio_fynd == 1,
+    n_segments_ge50 > 0
+  )
+
+potential_discrepancies
+
+
+# 6. Investigate segment availability around CAV-proxy decreases
+
+# Identify decreases using all observations in test2.6
+reversals <- test2.6 %>%
+  ungroup() %>%
+  arrange(lopnr, angio_date, desc(from_strax)) %>%
+  group_by(lopnr) %>%
+  filter(!is.na(cav_proxy)) %>%
+  mutate(
+    previous_cav = lag(cav_proxy),
+    previous_date = lag(angio_date),
+    previous_source = lag(from_strax)
+  ) %>%
+  filter(
+    !is.na(previous_cav),
+    cav_proxy < previous_cav
+  ) %>%
+  ungroup() %>%
+  mutate(
+    lopnr = as.character(lopnr),
+    previous_date = as.Date(previous_date),
+    angio_date = as.Date(angio_date)
+  )
+
+# Add segment information for the earlier examination
+reversals_segments <- reversals %>%
+  left_join(
+    seg_angio %>%
+      transmute(
+        lopnr,
+        previous_date = angio_date,
+        prev_n_segments = n_segments,
+        prev_n_ge50 = n_segments_ge50,
+        prev_n_ge70 = n_segments_ge70
+      ),
+    by = c("lopnr", "previous_date")
+  ) %>%
+  left_join(
+    seg_angio %>%
+      transmute(
+        lopnr, angio_date,
+        current_n_segments = n_segments,
+        current_n_ge50 = n_segments_ge50,
+        current_n_ge70 = n_segments_ge70
+      ),
+    by = keys
+  )
+
+# Count decreases by source of the two examinations
+reversals_segments %>%
+  count(previous_source, from_strax)
+
+# Examine the individual decreases
+reversals_segments %>%
+  select(
+    lopnr, previous_date, angio_date,
+    previous_cav, cav_proxy,
+    previous_source, from_strax,
+    prev_n_segments, current_n_segments,
+    prev_n_ge50, current_n_ge50,
+    prev_n_ge70, current_n_ge70
+  ) %>%
+  arrange(lopnr, angio_date)
