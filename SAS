@@ -1424,3 +1424,199 @@ title;
 
 
 mathis sucks
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+library(dplyr)
+library(gridExtra)
+library(grid)
+library(gtable)
+
+# ============================================================
+# 1. ORDER OBSERVATIONS
+# ============================================================
+
+out <- out %>%
+  ungroup() %>%
+  arrange(lopnr, angio_date, desc(from_strax))
+
+
+# ============================================================
+# 2. IDENTIFY DECREASES IN CAV PROXY
+# ============================================================
+
+decreases <- out %>%
+  filter(!is.na(cav_proxy)) %>%
+  group_by(lopnr) %>%
+  mutate(
+    previous_cav = lag(cav_proxy)
+  ) %>%
+  filter(
+    !is.na(previous_cav),
+    cav_proxy < previous_cav
+  ) %>%
+  ungroup()
+
+
+# ============================================================
+# 3. SUMMARISE TRANSITION TYPES
+# ============================================================
+
+transition_summary <- decreases %>%
+  group_by(previous_cav, cav_proxy) %>%
+  summarise(
+    n = n(),
+    n_patients = n_distinct(lopnr),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(previous_cav), cav_proxy)
+
+# Overall counts
+n_patients <- n_distinct(decreases$lopnr)
+n_decreases <- nrow(decreases)
+
+
+# ============================================================
+# 4. CREATE SUMMARY TEXT
+# ============================================================
+
+summary_lines <- c(
+  "SUMMARY OF DECREASES IN CAV PROXY",
+  "",
+  sprintf("Patients with decreases: %d", n_patients),
+  sprintf("Total decreases: %d", n_decreases),
+  "",
+  "Transitions (occurrences; unique patients):",
+  sprintf(
+    "  %s -> %s: %d occurrences (%d patients)",
+    transition_summary$previous_cav,
+    transition_summary$cav_proxy,
+    transition_summary$n,
+    transition_summary$n_patients
+  )
+)
+
+summary_grob <- textGrob(
+  paste(summary_lines, collapse = "\n"),
+  x = 0.01,
+  y = 0.98,
+  just = c("left", "top"),
+  gp = gpar(
+    fontsize = 11,
+    fontfamily = "Aptos"
+  )
+)
+
+
+# ============================================================
+# 5. CREATE PATIENT-LEVEL TABLE
+# ============================================================
+
+row_height <- 0.25
+
+tbl <- tableGrob(
+  out,
+  rows = NULL,
+  theme = ttheme_minimal(
+    base_size = 9,
+    base_family = "Aptos"
+  )
+)
+
+# Set consistent row heights
+tbl$heights <- unit(
+  rep(row_height, length(tbl$heights)),
+  "in"
+)
+
+
+# ============================================================
+# 6. ADD HORIZONTAL LINES BETWEEN PATIENTS
+# ============================================================
+
+# Identify first observation of each new patient
+patient_starts <- which(!duplicated(out$lopnr))[-1]
+
+for (i in patient_starts) {
+
+  tbl <- gtable_add_grob(
+    tbl,
+    grobs = segmentsGrob(
+      x0 = unit(0, "npc"),
+      x1 = unit(1, "npc"),
+      y0 = unit(1, "npc"),
+      y1 = unit(1, "npc"),
+      gp = gpar(
+        col = "grey30",
+        lwd = 2
+      )
+    ),
+    t = i + 1,
+    b = i + 1,
+    l = 1,
+    r = length(tbl$widths),
+    clip = "off"
+  )
+}
+
+
+# ============================================================
+# 7. COMBINE SUMMARY AND TABLE
+# ============================================================
+
+summary_height <- max(
+  1.5,
+  0.22 * length(summary_lines)
+)
+
+table_height <- row_height * (nrow(out) + 1)
+
+final_tbl <- arrangeGrob(
+  summary_grob,
+  tbl,
+  ncol = 1,
+  heights = unit(
+    c(summary_height, table_height),
+    "in"
+  )
+)
+
+
+# ============================================================
+# 8. EXPORT AS ONE LONG PNG
+# ============================================================
+
+total_height <- summary_height + table_height
+
+# Keep image dimensions below the graphics device's limit
+dpi <- min(100, floor(45000 / total_height))
+
+if (dpi < 60) {
+  stop("Image too long for a readable single PNG.")
+}
+
+ggplot2::ggsave(
+  "desc_patients_20261020.png",
+  plot = final_tbl,
+  width = max(12, 1.1 * ncol(out)),
+  height = total_height,
+  units = "in",
+  dpi = dpi,
+  limitsize = FALSE
+)
