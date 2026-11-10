@@ -1,0 +1,290 @@
+/**********************************************************************
+***********************************************************************
+
+    TABLE 4 — ANGIOGRAPHY COVERAGE DURING FOLLOW-UP
+
+***********************************************************************
+***********************************************************************/
+
+/* Reuse the existing macro variables:
+      &goutpath.   Output directory
+      &rdat8.      Current date (YYYYMMDD)
+      &font.       Font family
+*/
+
+%let COVERAGE_FILE_NUMB = 04_01;
+%let COVERAGE_INFILE = &goutpath.angiography_coverage_table.xlsx;
+
+
+/* ====================================================================
+   1. Import Excel data
+   ==================================================================== */
+
+proc import
+    datafile="&COVERAGE_INFILE."
+    dbms=xlsx
+    out=coverage_import
+    replace;
+    getnames=yes;
+run;
+
+
+/* ====================================================================
+   2. Prepare data for PROC REPORT
+   ==================================================================== */
+
+/* Ensure original row ordering */
+proc sort data=coverage_import out=coverage_sorted;
+    by row_order;
+run;
+
+data coverage_report;
+
+    length
+        section_title         $60
+        investigation_display $80
+        time_point_display    $30
+        time_window_display   $40
+        eligible_print        $30
+        angiography_print     $30
+        coverage_print        $50
+    ;
+
+    retain section_title;
+
+    set coverage_sorted;
+
+    /* Retain center heading for subsequent rows */
+    if row_type = "section" then do;
+        section_title = strip(label);
+    end;
+
+    else if row_type = "data" then do;
+
+        investigation_display = strip(investigation_print);
+        time_point_display    = strip(time_point);
+        time_window_display   = strip(time_window);
+
+        /* VVALUE works for numeric or character Excel imports */
+        eligible_print    = strip(vvalue(eligible_N));
+        angiography_print = strip(vvalue(angiography_n));
+        coverage_print    = strip(coverage_display);
+
+        if eligible_print    = "." then eligible_print    = "";
+        if angiography_print = "." then angiography_print = "";
+        if coverage_print    = "." then coverage_print    = "";
+
+        output;
+    end;
+
+run;
+
+
+/* ====================================================================
+   3. Output settings
+   ==================================================================== */
+
+options
+    orientation=landscape
+    papersize=A4
+    nodate
+    nonumber
+;
+
+ods escapechar='^';
+ods listing close;
+
+title;
+footnote;
+
+
+/* ====================================================================
+   4. Create separate table heading
+   ==================================================================== */
+
+ods rtf file="&goutpath.TableHeader_&COVERAGE_FILE_NUMB._&rdat8..rtf"
+    style=styles.journal
+    bodytitle;
+
+ods rtf text=
+    "^{style [fontfamily='&font.'
+              fontsize=14pt
+              fontweight=bold
+              foreground=cx174961]
+      Table 4. Angiography Coverage During Follow-Up}";
+
+ods rtf close;
+
+
+/* ====================================================================
+   5. Create table
+   ==================================================================== */
+
+ods rtf file="&goutpath.Table_&COVERAGE_FILE_NUMB._&rdat8..rtf"
+    style=styles.journal
+    bodytitle;
+
+proc report data=coverage_report nowd
+    split='#'
+    missing
+
+    style(report)=[
+        frame=box
+        rules=all
+        bordercolor=cxBDBDBD
+        borderwidth=0.5pt
+        cellspacing=0
+        cellpadding=2pt
+    ]
+
+    style(header)=[
+        background=cxBDBDBD
+        foreground=black
+        fontfamily="&font."
+        fontsize=9pt
+        fontweight=bold
+        just=center
+    ]
+
+    style(column)=[
+        background=white
+        fontfamily="&font."
+        fontsize=9pt
+        vjust=middle
+    ];
+
+    column
+        section_title
+        row_order
+        investigation_display
+        time_point_display
+        time_window_display
+        eligible_print
+        angiography_print
+        coverage_print
+    ;
+
+    /* Hidden ordering and grouping variables */
+
+    define section_title /
+        order order=data noprint;
+
+    define row_order /
+        order noprint;
+
+    /* Visible columns */
+
+    define investigation_display /
+        display "Type of#investigation"
+        width=27
+        style(column)=[
+            cellwidth=2.00in
+            just=left
+        ];
+
+    define time_point_display /
+        display "Time point"
+        width=16
+        style(column)=[
+            cellwidth=1.10in
+            just=center
+        ];
+
+    define time_window_display /
+        display "Time window#post-HTx"
+        width=26
+        style(column)=[
+            cellwidth=2.00in
+            just=center
+        ];
+
+    define eligible_print /
+        display "Eligible#N"
+        width=15
+        style(column)=[
+            cellwidth=1.20in
+            just=center
+        ];
+
+    define angiography_print /
+        display "Angiography#n"
+        width=17
+        style(column)=[
+            cellwidth=1.30in
+            just=center
+        ];
+
+    define coverage_print /
+        display "Coverage#n/N (%)"
+        width=23
+        style(column)=[
+            cellwidth=1.65in
+            just=center
+        ];
+
+
+    /* ------------------------------------------------------------
+       Center headings: Gothenburg, Lund, Stockholm, All centers
+       ------------------------------------------------------------ */
+
+    compute before section_title /
+        style=[
+            background=cxD9D9D9
+            foreground=black
+            fontfamily="&font."
+            fontsize=9pt
+            fontweight=bold
+            just=center
+        ];
+
+        line section_title $60.;
+
+    endcomp;
+
+
+    /* ------------------------------------------------------------
+       Bold investigation category labels
+       ------------------------------------------------------------ */
+
+    compute investigation_display;
+
+        if not missing(investigation_display) then
+            call define(
+                _col_,
+                "style",
+                "style=[fontweight=bold just=left]"
+            );
+
+    endcomp;
+
+
+    /* ------------------------------------------------------------
+       Table note
+       ------------------------------------------------------------ */
+
+    compute after /
+        style=[
+            background=white
+            foreground=black
+            fontfamily="&font."
+            fontsize=8pt
+            just=left
+            bordertopwidth=0pt
+            borderbottomwidth=0pt
+        ];
+
+        line 'Eligible patients were alive, not re-transplanted, and under follow-up at the end of the respective time window.';
+
+        line 'Angiography n represents eligible patients with at least one included angiography during the window. Inconclusive angiographies were included.';
+
+    endcomp;
+
+run;
+
+ods rtf close;
+ods listing;
+
+
+/**********************************************************************
+    END OF TABLE 4
+**********************************************************************/
