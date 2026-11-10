@@ -1,0 +1,237 @@
+# ============================================================
+# Table 4: Angiography coverage during follow-up
+# ============================================================
+
+# Configuration
+coverage_center_var <- "center"  # Replace with actual center variable
+coverage_centers <- c("Gothenburg", "Lund", "Stockholm")
+coverage_days_per_year <- 365.25
+
+# Define follow-up windows
+coverage_windows <- tibble::tribble(
+  ~window_id, ~investigation,          ~time_point, ~start_year, ~end_year, ~last_inclusive,
+  1,          "Early routine follow-up", "Baseline",  0,           0.5,       FALSE,
+  2,          "Early routine follow-up", "1 year",    0.5,         2,         FALSE,
+  3,          "Early routine follow-up", "3 years",   2,           4,         FALSE,
+  4,          "Early routine follow-up", "6 years",   4,           7,         FALSE,
+  5,          "Late control",            "9 years",   7,           10,        FALSE,
+  6,          "Late control",            "12 years",  10,          15,        FALSE,
+  7,          "Late control",            "17 years",  15,          20,        TRUE
+) %>%
+  mutate(
+    start_days = start_year * coverage_days_per_year,
+    end_days = end_year * coverage_days_per_year,
+    time_window = c(
+      "<0.5 years",
+      "0.5-<2 years",
+      "2-<4 years",
+      "4-<7 years",
+      "7-<10 years",
+      "10-<15 years",
+      "15-<=20 years"
+    )
+  )
+
+# Check required variables
+stopifnot(all(c(
+  "lopnr", "angio_date", "included_angio",
+  "days_since_surgery_1", "fup_days",
+  coverage_center_var
+) %in% names(dat2)))
+
+# Prepare patient-level data
+# Retains patients without angiography registrations
+coverage_patients <- dat2 %>%
+  ungroup() %>%
+  mutate(center = as.character(.data[[coverage_center_var]])) %>%
+  group_by(lopnr) %>%
+  summarise(
+    center = {
+      x <- unique(center[!is.na(center) & center != ""])
+      if(length(x)) x[1] else NA_character_
+    },
+    fup_days = if(all(is.na(fup_days))) {
+      NA_real_
+    } else {
+      max(fup_days, na.rm = TRUE)
+    },
+    .groups = "drop"
+  )
+
+# Check center coding before proceeding
+coverage_unknown_centers <- coverage_patients %>%
+  filter(is.na(center) | !center %in% coverage_centers)
+
+if(nrow(coverage_unknown_centers) > 0) {
+  stop("Some patients have missing or unrecognized centers. Check coverage_unknown_centers.")
+}
+
+# Identify included angiographies
+# Inconclusive and missing FYND are retained
+coverage_angios <- dat2 %>%
+  ungroup() %>%
+  filter(included_angio %in% TRUE) %>%
+  select(lopnr, angio_date, days_since_surgery_1) %>%
+  distinct() %>%
+  left_join(
+    coverage_patients %>% select(lopnr, fup_days),
+    by = "lopnr"
+  ) %>%
+  filter(
+    !is.na(angio_date),
+    days_since_surgery_1 >= 0,
+    days_since_surgery_1 <= fup_days
+  )
+
+# Determine which window each angiography belongs to
+coverage_angio_windows <- tidyr::crossing(
+  coverage_angios,
+  coverage_windows
+) %>%
+  filter(
+    days_since_surgery_1 >= start_days,
+    if_else(
+      last_inclusive,
+      days_since_surgery_1 <= end_days,
+      days_since_surgery_1 < end_days
+    )
+  ) %>%
+  distinct(lopnr, window_id) %>%
+  mutate(has_angio = TRUE)
+
+# Identify eligible patients at the end of each window
+coverage_patient_windows <- tidyr::crossing(
+  coverage_patients,
+  coverage_windows
+) %>%
+  mutate(
+    eligible = !is.na(fup_days) & fup_days >= end_days
+  ) %>%
+  left_join(
+    coverage_angio_windows,
+    by = c("lopnr", "window_id")
+  ) %>%
+  mutate(has_angio = coalesce(has_angio, FALSE))
+
+# Summarise by center
+coverage_by_center <- coverage_patient_windows %>%
+  group_by(center, window_id) %>%
+  summarise(
+    N = sum(eligible),
+    n = sum(eligible & has_angio),
+    .groups = "drop"
+  )
+
+# Summarise all centers
+coverage_all_centers <- coverage_patient_windows %>%
+  group_by(window_id) %>%
+  summarise(
+    N = sum(eligible),
+    n = sum(eligible & has_angio),
+    .groups = "drop"
+  ) %>%
+  mutate(center = "All centers")
+
+# Combine and calculate coverage
+coverage_results <- bind_rows(
+  coverage_by_center,
+  coverage_all_centers
+) %>%
+  mutate(
+    coverage_pct = if_else(N > 0, 100 * n / pmax(N, 1), NA_real_),
+    coverage_display = if_else(
+      N > 0,
+      sprintf("%d/%d (%.1f%%)", n, N, coverage_pct),
+      ""
+    )
+  )
+
+# ============================================================
+# Prepare Table 4 for SAS
+# ============================================================
+
+# Create all center/window combinations
+coverage_body <- tidyr::crossing(
+  center = c(coverage_centers, "All centers"),
+  coverage_windows
+) %>%
+  left_join(
+    coverage_results,
+    by = c("center", "window_id")
+  ) %>%
+  mutate(
+    N = replace_na(N, 0L),
+    n = replace_na(n, 0L),
+
+    row_order = match(
+      center, c(coverage_centers, "All centers")
+    ) * 100 + window_id,
+
+    row_id = paste0("coverage_", window_id),
+    row_type = "data",
+    label = "",
+
+    # Show investigation type only at the beginning
+    # of each investigation group
+    investigation_print = if_else(
+      window_id %in% c(1, 5),
+      investigation,
+      ""
+    ),
+
+    eligible_N = as.character(N),
+    angiography_n = as.character(n)
+  )
+
+# Create section-heading rows for each center
+coverage_sections <- tibble(
+  center = c(coverage_centers, "All centers"),
+  row_order = seq_along(center) * 100,
+  row_id = paste0("section_", seq_along(center)),
+  row_type = "section",
+  label = center,
+  investigation_print = "",
+  time_point = "",
+  time_window = "",
+  eligible_N = "",
+  angiography_n = "",
+  coverage_display = ""
+)
+
+# Combine and order the presentation-ready table
+coverage_table <- bind_rows(
+  coverage_body %>%
+    select(
+      center, row_order, row_id, row_type, label,
+      investigation_print, time_point, time_window,
+      eligible_N, angiography_n, coverage_display
+    ),
+  coverage_sections
+) %>%
+  arrange(row_order) %>%
+  select(
+    row_order, row_id, center, row_type, label,
+    investigation_print, time_point, time_window,
+    eligible_N, angiography_n, coverage_display
+  )
+
+# ============================================================
+# Checks and export
+# ============================================================
+
+# Inspect coverage calculations
+coverage_results %>%
+  arrange(match(center, c(coverage_centers, "All centers")), window_id)
+
+# Verify that the numerator never exceeds the denominator
+stopifnot(all(coverage_results$n <= coverage_results$N))
+
+# Inspect final table
+View(coverage_table)
+
+# Export to Excel
+openxlsx::write.xlsx(
+  coverage_table,
+  "angiography_coverage_table.xlsx",
+  overwrite = TRUE
+)
