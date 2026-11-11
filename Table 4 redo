@@ -1,0 +1,304 @@
+
+/**********************************************************************
+***********************************************************************
+
+    FOLLOW-UP SUMMARY TABLE — ODSOUT VERSION
+    Alternative to the existing PROC REPORT implementation
+
+***********************************************************************
+***********************************************************************/
+
+
+/* ====================================================================
+   1. Prepare data for ODSOUT
+   ==================================================================== */
+
+proc sort data=work.htx_import out=work.htx_ods_sorted;
+    by row_order;
+run;
+
+data work.htx_ods_ready;
+
+    length
+        row_kind       $20
+        label_ods      $500
+        footmark       $10
+        p0_7_ods       $100
+        ge7_ods        $100
+        entire_ods     $100
+    ;
+
+    set work.htx_ods_sorted;
+
+    row_kind  = lowcase(strip(row_type));
+    label_ods = strip(label);
+
+    /* Superscript footnote markers */
+    footmark = strip(vvalue(footnote));
+
+    if not missing(footmark) and footmark ne "." then
+        label_ods = strip(label_ods) ||
+                    '^{super ' || strip(footmark) || '}';
+
+    /* Indent subcategories */
+    if row_kind = "data" and strip(vvalue(indent)) = "1" then
+        label_ods = "    " || strip(label_ods);
+
+    /* Preserve values regardless of Excel import type */
+    p0_7_ods   = strip(vvalue(p0_7));
+    ge7_ods    = strip(vvalue(ge7));
+    entire_ods = strip(vvalue(entire));
+
+    if p0_7_ods   = "." then p0_7_ods   = "";
+    if ge7_ods    = "." then ge7_ods    = "";
+    if entire_ods = "." then entire_ods = "";
+
+run;
+
+
+/* ====================================================================
+   2. RTF output settings
+   ==================================================================== */
+
+options
+    orientation=landscape
+    papersize=A4
+    leftmargin=0.6in
+    rightmargin=0.6in
+    topmargin=0.7in
+    bottommargin=0.7in
+    nodate
+    nonumber
+;
+
+ods escapechar='^';
+ods listing close;
+
+title;
+footnote;
+
+ods rtf file=
+    "&goutpath.Table_&FILE_NUMB._ODSOUT_&rdat8..rtf"
+    style=styles.journal
+    bodytitle;
+
+
+/* ====================================================================
+   3. Construct table using DATA _NULL_ and ODSOUT
+   ==================================================================== */
+
+data _null_;
+
+    set work.htx_ods_ready end=last;
+
+    /* ---------------------------------------------------------------
+       Initialize table and column headers
+       --------------------------------------------------------------- */
+
+    if _N_ = 1 then do;
+
+        dcl odsout obj();
+
+        obj.table_start(
+            overrides:"width=10.25in"
+        );
+
+        obj.head_start();
+
+        obj.row_start(type:"Header");
+
+        obj.format_cell(
+            text:"Characteristic",
+            overrides:
+                "just=l vjust=m background=CXBDBDBD
+                 cellwidth=4.10in fontfamily='&font.'
+                 fontweight=bold fontsize=9pt"
+        );
+
+        obj.format_cell(
+            text:"0-<7 years",
+            overrides:
+                "just=c vjust=m background=CXBDBDBD
+                 cellwidth=2.05in fontfamily='&font.'
+                 fontweight=bold fontsize=9pt"
+        );
+
+        obj.format_cell(
+            text:">=7 years",
+            overrides:
+                "just=c vjust=m background=CXBDBDBD
+                 cellwidth=2.05in fontfamily='&font.'
+                 fontweight=bold fontsize=9pt"
+        );
+
+        obj.format_cell(
+            text:"Entire follow-up",
+            overrides:
+                "just=c vjust=m background=CXBDBDBD
+                 cellwidth=2.05in fontfamily='&font.'
+                 fontweight=bold fontsize=9pt"
+        );
+
+        obj.row_end();
+
+        obj.head_end();
+
+    end;
+
+
+    /* ---------------------------------------------------------------
+       A. Section headings
+          One merged gray cell spanning all four columns
+       --------------------------------------------------------------- */
+
+    if row_kind = "section" then do;
+
+        obj.row_start();
+
+        obj.format_cell(
+            data:label_ods,
+            column_span:4,
+            overrides:
+                "just=l vjust=m background=CXD9D9D9
+                 cellwidth=10.25in fontfamily='&font.'
+                 fontweight=bold fontsize=9pt"
+        );
+
+        obj.row_end();
+
+    end;
+
+
+    /* ---------------------------------------------------------------
+       B. Subheadings
+          Example: Reason follow-up ended, n (%)
+       --------------------------------------------------------------- */
+
+    else if row_kind = "subheading" then do;
+
+        obj.row_start();
+
+        obj.format_cell(
+            data:label_ods,
+            column_span:4,
+            overrides:
+                "just=l vjust=m background=CXF2F2F2
+                 cellwidth=10.25in fontfamily='&font.'
+                 fontweight=bold fontsize=9pt"
+        );
+
+        obj.row_end();
+
+    end;
+
+
+    /* ---------------------------------------------------------------
+       C. Ordinary data rows
+       --------------------------------------------------------------- */
+
+    else do;
+
+        obj.row_start();
+
+        obj.format_cell(
+            data:label_ods,
+            overrides:
+                "just=l vjust=m cellwidth=4.10in
+                 fontfamily='&font.' fontsize=9pt"
+        );
+
+        obj.format_cell(
+            data:p0_7_ods,
+            overrides:
+                "just=c vjust=m cellwidth=2.05in
+                 fontfamily='&font.' fontsize=9pt"
+        );
+
+        obj.format_cell(
+            data:ge7_ods,
+            overrides:
+                "just=c vjust=m cellwidth=2.05in
+                 fontfamily='&font.' fontsize=9pt"
+        );
+
+        obj.format_cell(
+            data:entire_ods,
+            overrides:
+                "just=c vjust=m cellwidth=2.05in
+                 fontfamily='&font.' fontsize=9pt"
+        );
+
+        obj.row_end();
+
+    end;
+
+
+    /* ---------------------------------------------------------------
+       D. Notes and footnotes
+          Separate full-width cells
+       --------------------------------------------------------------- */
+
+    if last then do;
+
+        /* General note */
+        obj.row_start();
+
+        obj.format_cell(
+            text:
+                "Notes: Unless otherwise specified, patient-level percentages are calculated using the number of patients at the beginning of the respective follow-up period. Percentages for subcategories are calculated relative to their parent category. Angiography-level percentages use the number of included angiographies.",
+            column_span:4,
+            overrides:
+                "just=l vjust=t cellwidth=10.25in
+                 fontfamily='&font.' fontsize=8pt
+                 background=CXFFFFFF"
+        );
+
+        obj.row_end();
+
+
+        /* Footnote a */
+        obj.row_start();
+
+        obj.format_cell(
+            text:
+                "^{super a} Denominator: Patients with at least one included angiography with a non-missing, conclusive FYND during the period.",
+            column_span:4,
+            overrides:
+                "just=l vjust=t cellwidth=10.25in
+                 fontfamily='&font.' fontsize=8pt
+                 background=CXFFFFFF"
+        );
+
+        obj.row_end();
+
+
+        /* Footnote b */
+        obj.row_start();
+
+        obj.format_cell(
+            text:
+                "^{super b} Denominator: Patients with at least one included angiography showing FYND >=2 during the period.",
+            column_span:4,
+            overrides:
+                "just=l vjust=t cellwidth=10.25in
+                 fontfamily='&font.' fontsize=8pt
+                 background=CXFFFFFF"
+        );
+
+        obj.row_end();
+
+
+        /* End table */
+        obj.table_end();
+
+    end;
+
+run;
+
+ods rtf close;
+ods listing;
+
+
+/**********************************************************************
+    END OF FOLLOW-UP SUMMARY TABLE — ODSOUT VERSION
+**********************************************************************/
