@@ -2,56 +2,77 @@
 /**********************************************************************
 ***********************************************************************
 
-    FOLLOW-UP SUMMARY TABLE — ODSOUT VERSION
-    Alternative to the existing PROC REPORT implementation
+    TABLE 4 — ANGIOGRAPHY COVERAGE DURING FOLLOW-UP
+    ODSOUT VERSION (MERGED CELLS)
 
 ***********************************************************************
 ***********************************************************************/
 
+/* Reuse existing macro variables:
+   &goutpath.  Output directory
+   &rdat8.     Date suffix
+   &font.      Font family
+*/
+
+%let COVERAGE_FILE_NUMB = 04_01;
+%let COVERAGE_INFILE = &goutpath.angiography_coverage_table.xlsx;
+
 
 /* ====================================================================
-   1. Prepare data for ODSOUT
+   1. Import and prepare data
    ==================================================================== */
 
-proc sort data=work.htx_import out=work.htx_ods_sorted;
+proc import
+    datafile="&COVERAGE_INFILE."
+    dbms=xlsx
+    out=coverage_import
+    replace;
+    getnames=yes;
+run;
+
+proc sort data=coverage_import out=coverage_sorted;
     by row_order;
 run;
 
-data work.htx_ods_ready;
+data coverage_ods_ready;
 
     length
-        row_kind       $20
-        label_ods      $500
-        footmark       $10
-        p0_7_ods       $100
-        ge7_ods        $100
-        entire_ods     $100
+        row_kind              $20
+        center_display        $60
+        investigation_display $80
+        time_point_display    $30
+        time_window_display   $40
+        eligible_display      $30
+        angiography_display   $30
+        coverage_display_ods  $50
     ;
 
-    set work.htx_ods_sorted;
+    set coverage_sorted;
 
-    row_kind  = lowcase(strip(row_type));
-    label_ods = strip(label);
+    row_kind = lowcase(strip(row_type));
 
-    /* Superscript footnote markers */
-    footmark = strip(vvalue(footnote));
+    if row_kind = "section" then
+        center_display = strip(label);
 
-    if not missing(footmark) and footmark ne "." then
-        label_ods = strip(label_ods) ||
-                    '^{super ' || strip(footmark) || '}';
+    else if row_kind = "data" then do;
+        investigation_display = strip(investigation_print);
+        time_point_display    = strip(time_point);
+        time_window_display   = strip(time_window);
 
-    /* Indent subcategories */
-    if row_kind = "data" and strip(vvalue(indent)) = "1" then
-        label_ods = "    " || strip(label_ods);
+        /* VVALUE handles numeric and character Excel columns */
+        eligible_display      = strip(vvalue(eligible_N));
+        angiography_display   = strip(vvalue(angiography_n));
+        coverage_display_ods  = strip(coverage_display);
 
-    /* Preserve values regardless of Excel import type */
-    p0_7_ods   = strip(vvalue(p0_7));
-    ge7_ods    = strip(vvalue(ge7));
-    entire_ods = strip(vvalue(entire));
+        if eligible_display = "." then
+            eligible_display = "";
 
-    if p0_7_ods   = "." then p0_7_ods   = "";
-    if ge7_ods    = "." then ge7_ods    = "";
-    if entire_ods = "." then entire_ods = "";
+        if angiography_display = "." then
+            angiography_display = "";
+
+        if coverage_display_ods = "." then
+            coverage_display_ods = "";
+    end;
 
 run;
 
@@ -63,10 +84,6 @@ run;
 options
     orientation=landscape
     papersize=A4
-    leftmargin=0.6in
-    rightmargin=0.6in
-    topmargin=0.7in
-    bottommargin=0.7in
     nodate
     nonumber
 ;
@@ -78,7 +95,7 @@ title;
 footnote;
 
 ods rtf file=
-    "&goutpath.Table_&FILE_NUMB._ODSOUT_&rdat8..rtf"
+    "&goutpath.Table_&COVERAGE_FILE_NUMB._ODSOUT_&rdat8..rtf"
     style=styles.journal
     bodytitle;
 
@@ -89,10 +106,10 @@ ods rtf file=
 
 data _null_;
 
-    set work.htx_ods_ready end=last;
+    set coverage_ods_ready end=last;
 
     /* ---------------------------------------------------------------
-       Initialize table and column headers
+       A. Initialize table and headers
        --------------------------------------------------------------- */
 
     if _N_ = 1 then do;
@@ -100,7 +117,7 @@ data _null_;
         dcl odsout obj();
 
         obj.table_start(
-            overrides:"width=10.25in"
+            overrides:"width=9.25in"
         );
 
         obj.head_start();
@@ -108,47 +125,62 @@ data _null_;
         obj.row_start(type:"Header");
 
         obj.format_cell(
-            text:"Characteristic",
+            text:"Type of investigation",
             overrides:
-                "just=l vjust=m background=CXBDBDBD
-                 cellwidth=4.10in fontfamily='&font.'
+                "just=c vjust=m background=CXBDBDBD
+                 cellwidth=2.00in fontfamily='&font.'
                  fontweight=bold fontsize=9pt"
         );
 
         obj.format_cell(
-            text:"0-<7 years",
+            text:"Time point",
             overrides:
                 "just=c vjust=m background=CXBDBDBD
-                 cellwidth=2.05in fontfamily='&font.'
+                 cellwidth=1.10in fontfamily='&font.'
                  fontweight=bold fontsize=9pt"
         );
 
         obj.format_cell(
-            text:">=7 years",
+            text:"Time window post-HTx",
             overrides:
                 "just=c vjust=m background=CXBDBDBD
-                 cellwidth=2.05in fontfamily='&font.'
+                 cellwidth=2.00in fontfamily='&font.'
                  fontweight=bold fontsize=9pt"
         );
 
         obj.format_cell(
-            text:"Entire follow-up",
+            text:"Eligible N",
             overrides:
                 "just=c vjust=m background=CXBDBDBD
-                 cellwidth=2.05in fontfamily='&font.'
+                 cellwidth=1.20in fontfamily='&font.'
+                 fontweight=bold fontsize=9pt"
+        );
+
+        obj.format_cell(
+            text:"Angiography n",
+            overrides:
+                "just=c vjust=m background=CXBDBDBD
+                 cellwidth=1.30in fontfamily='&font.'
+                 fontweight=bold fontsize=9pt"
+        );
+
+        obj.format_cell(
+            text:"Coverage n/N (%)",
+            overrides:
+                "just=c vjust=m background=CXBDBDBD
+                 cellwidth=1.65in fontfamily='&font.'
                  fontweight=bold fontsize=9pt"
         );
 
         obj.row_end();
-
         obj.head_end();
 
     end;
 
 
     /* ---------------------------------------------------------------
-       A. Section headings
-          One merged gray cell spanning all four columns
+       B. Center headings
+          Merge all six columns
        --------------------------------------------------------------- */
 
     if row_kind = "section" then do;
@@ -156,11 +188,11 @@ data _null_;
         obj.row_start();
 
         obj.format_cell(
-            data:label_ods,
-            column_span:4,
+            data:center_display,
+            column_span:6,
             overrides:
-                "just=l vjust=m background=CXD9D9D9
-                 cellwidth=10.25in fontfamily='&font.'
+                "just=c vjust=m background=CXD9D9D9
+                 cellwidth=9.25in fontfamily='&font.'
                  fontweight=bold fontsize=9pt"
         );
 
@@ -170,21 +202,91 @@ data _null_;
 
 
     /* ---------------------------------------------------------------
-       B. Subheadings
-          Example: Reason follow-up ended, n (%)
+       C. Data rows
        --------------------------------------------------------------- */
 
-    else if row_kind = "subheading" then do;
+    else if row_kind = "data" then do;
 
         obj.row_start();
 
+        /* -----------------------------------------------------------
+           Type of investigation: vertical cell merging
+
+           Early routine follow-up: 4 rows
+           Late control:           3 rows
+
+           Only create the cell on the first row of each group.
+           ----------------------------------------------------------- */
+
+        if strip(investigation_display) =
+            "Early routine follow-up" then do;
+
+            obj.format_cell(
+                data:investigation_display,
+                row_span:4,
+                overrides:
+                    "just=l vjust=m cellwidth=2.00in
+                     fontfamily='&font.'
+                     fontweight=bold fontsize=9pt"
+            );
+
+        end;
+
+        else if strip(investigation_display) =
+            "Late control" then do;
+
+            obj.format_cell(
+                data:investigation_display,
+                row_span:3,
+                overrides:
+                    "just=l vjust=m cellwidth=2.00in
+                     fontfamily='&font.'
+                     fontweight=bold fontsize=9pt"
+            );
+
+        end;
+
+        /* Otherwise, the investigation cell is already
+           occupied by the spanning cell from an earlier row. */
+
+
+        /* -----------------------------------------------------------
+           Remaining columns
+           ----------------------------------------------------------- */
+
         obj.format_cell(
-            data:label_ods,
-            column_span:4,
+            data:time_point_display,
             overrides:
-                "just=l vjust=m background=CXF2F2F2
-                 cellwidth=10.25in fontfamily='&font.'
-                 fontweight=bold fontsize=9pt"
+                "just=c vjust=m cellwidth=1.10in
+                 fontfamily='&font.' fontsize=9pt"
+        );
+
+        obj.format_cell(
+            data:time_window_display,
+            overrides:
+                "just=c vjust=m cellwidth=2.00in
+                 fontfamily='&font.' fontsize=9pt"
+        );
+
+        obj.format_cell(
+            data:eligible_display,
+            overrides:
+                "just=c vjust=m cellwidth=1.20in
+                 fontfamily='&font.' fontsize=9pt"
+        );
+
+        obj.format_cell(
+            data:angiography_display,
+            overrides:
+                "just=c vjust=m cellwidth=1.30in
+                 fontfamily='&font.' fontsize=9pt"
+        );
+
+        obj.format_cell(
+            data:coverage_display_ods,
+            overrides:
+                "just=c vjust=m cellwidth=1.65in
+                 fontfamily='&font.' fontsize=9pt"
         );
 
         obj.row_end();
@@ -193,102 +295,25 @@ data _null_;
 
 
     /* ---------------------------------------------------------------
-       C. Ordinary data rows
-       --------------------------------------------------------------- */
-
-    else do;
-
-        obj.row_start();
-
-        obj.format_cell(
-            data:label_ods,
-            overrides:
-                "just=l vjust=m cellwidth=4.10in
-                 fontfamily='&font.' fontsize=9pt"
-        );
-
-        obj.format_cell(
-            data:p0_7_ods,
-            overrides:
-                "just=c vjust=m cellwidth=2.05in
-                 fontfamily='&font.' fontsize=9pt"
-        );
-
-        obj.format_cell(
-            data:ge7_ods,
-            overrides:
-                "just=c vjust=m cellwidth=2.05in
-                 fontfamily='&font.' fontsize=9pt"
-        );
-
-        obj.format_cell(
-            data:entire_ods,
-            overrides:
-                "just=c vjust=m cellwidth=2.05in
-                 fontfamily='&font.' fontsize=9pt"
-        );
-
-        obj.row_end();
-
-    end;
-
-
-    /* ---------------------------------------------------------------
-       D. Notes and footnotes
-          Separate full-width cells
+       D. Table note
        --------------------------------------------------------------- */
 
     if last then do;
 
-        /* General note */
         obj.row_start();
 
         obj.format_cell(
             text:
-                "Notes: Unless otherwise specified, patient-level percentages are calculated using the number of patients at the beginning of the respective follow-up period. Percentages for subcategories are calculated relative to their parent category. Angiography-level percentages use the number of included angiographies.",
-            column_span:4,
+                "Eligible patients were alive, not re-transplanted, and under follow-up at the end of the corresponding time window. Angiography n represents eligible patients with at least one included angiography during the window, including inconclusive angiographies.",
+            column_span:6,
             overrides:
-                "just=l vjust=t cellwidth=10.25in
+                "just=l vjust=t cellwidth=9.25in
                  fontfamily='&font.' fontsize=8pt
                  background=CXFFFFFF"
         );
 
         obj.row_end();
 
-
-        /* Footnote a */
-        obj.row_start();
-
-        obj.format_cell(
-            text:
-                "^{super a} Denominator: Patients with at least one included angiography with a non-missing, conclusive FYND during the period.",
-            column_span:4,
-            overrides:
-                "just=l vjust=t cellwidth=10.25in
-                 fontfamily='&font.' fontsize=8pt
-                 background=CXFFFFFF"
-        );
-
-        obj.row_end();
-
-
-        /* Footnote b */
-        obj.row_start();
-
-        obj.format_cell(
-            text:
-                "^{super b} Denominator: Patients with at least one included angiography showing FYND >=2 during the period.",
-            column_span:4,
-            overrides:
-                "just=l vjust=t cellwidth=10.25in
-                 fontfamily='&font.' fontsize=8pt
-                 background=CXFFFFFF"
-        );
-
-        obj.row_end();
-
-
-        /* End table */
         obj.table_end();
 
     end;
@@ -300,5 +325,5 @@ ods listing;
 
 
 /**********************************************************************
-    END OF FOLLOW-UP SUMMARY TABLE — ODSOUT VERSION
+    END OF TABLE 4 — ODSOUT VERSION
 **********************************************************************/
