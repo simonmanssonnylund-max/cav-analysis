@@ -17,6 +17,13 @@
 %let COVERAGE_FILE_NUMB = 04_01;
 %let COVERAGE_INFILE = &goutpath.angiography_coverage_table.xlsx;
 
+/* Cell border formatting */
+%let coverage_border =
+    borderstyle=solid
+    bordercolor=CXBDBDBD
+    borderwidth=0.5pt
+;
+
 
 /* ====================================================================
    1. Import and prepare data
@@ -55,14 +62,15 @@ data coverage_ods_ready;
         center_display = strip(label);
 
     else if row_kind = "data" then do;
+
         investigation_display = strip(investigation_print);
         time_point_display    = strip(time_point);
         time_window_display   = strip(time_window);
 
-        /* VVALUE handles numeric and character Excel columns */
-        eligible_display      = strip(vvalue(eligible_N));
-        angiography_display   = strip(vvalue(angiography_n));
-        coverage_display_ods  = strip(coverage_display);
+        /* Handle numeric and character Excel imports */
+        eligible_display     = strip(vvalue(eligible_N));
+        angiography_display  = strip(vvalue(angiography_n));
+        coverage_display_ods = strip(vvalue(coverage_display));
 
         if eligible_display = "." then
             eligible_display = "";
@@ -72,6 +80,7 @@ data coverage_ods_ready;
 
         if coverage_display_ods = "." then
             coverage_display_ods = "";
+
     end;
 
 run;
@@ -84,6 +93,10 @@ run;
 options
     orientation=landscape
     papersize=A4
+    leftmargin=0.6in
+    rightmargin=0.6in
+    topmargin=0.6in
+    bottommargin=0.6in
     nodate
     nonumber
 ;
@@ -108,6 +121,7 @@ data _null_;
 
     set coverage_ods_ready end=last;
 
+
     /* ---------------------------------------------------------------
        A. Initialize table and headers
        --------------------------------------------------------------- */
@@ -117,7 +131,15 @@ data _null_;
         dcl odsout obj();
 
         obj.table_start(
-            overrides:"width=9.25in"
+            overrides:
+                "width=9.25in
+                 frame=box
+                 rules=all
+                 borderstyle=solid
+                 bordercolor=CXBDBDBD
+                 borderwidth=0.5pt
+                 cellspacing=0
+                 cellpadding=2pt"
         );
 
         obj.head_start();
@@ -129,7 +151,8 @@ data _null_;
             overrides:
                 "just=c vjust=m background=CXBDBDBD
                  cellwidth=2.00in fontfamily='&font.'
-                 fontweight=bold fontsize=9pt"
+                 fontweight=bold fontsize=9pt
+                 &coverage_border."
         );
 
         obj.format_cell(
@@ -137,7 +160,8 @@ data _null_;
             overrides:
                 "just=c vjust=m background=CXBDBDBD
                  cellwidth=1.10in fontfamily='&font.'
-                 fontweight=bold fontsize=9pt"
+                 fontweight=bold fontsize=9pt
+                 &coverage_border."
         );
 
         obj.format_cell(
@@ -145,7 +169,8 @@ data _null_;
             overrides:
                 "just=c vjust=m background=CXBDBDBD
                  cellwidth=2.00in fontfamily='&font.'
-                 fontweight=bold fontsize=9pt"
+                 fontweight=bold fontsize=9pt
+                 &coverage_border."
         );
 
         obj.format_cell(
@@ -153,7 +178,8 @@ data _null_;
             overrides:
                 "just=c vjust=m background=CXBDBDBD
                  cellwidth=1.20in fontfamily='&font.'
-                 fontweight=bold fontsize=9pt"
+                 fontweight=bold fontsize=9pt
+                 &coverage_border."
         );
 
         obj.format_cell(
@@ -161,7 +187,8 @@ data _null_;
             overrides:
                 "just=c vjust=m background=CXBDBDBD
                  cellwidth=1.30in fontfamily='&font.'
-                 fontweight=bold fontsize=9pt"
+                 fontweight=bold fontsize=9pt
+                 &coverage_border."
         );
 
         obj.format_cell(
@@ -169,7 +196,8 @@ data _null_;
             overrides:
                 "just=c vjust=m background=CXBDBDBD
                  cellwidth=1.65in fontfamily='&font.'
-                 fontweight=bold fontsize=9pt"
+                 fontweight=bold fontsize=9pt
+                 &coverage_border."
         );
 
         obj.row_end();
@@ -193,7 +221,8 @@ data _null_;
             overrides:
                 "just=c vjust=m background=CXD9D9D9
                  cellwidth=9.25in fontfamily='&font.'
-                 fontweight=bold fontsize=9pt"
+                 fontweight=bold fontsize=9pt
+                 &coverage_border."
         );
 
         obj.row_end();
@@ -214,8 +243,6 @@ data _null_;
 
            Early routine follow-up: 4 rows
            Late control:           3 rows
-
-           Only create the cell on the first row of each group.
            ----------------------------------------------------------- */
 
         if strip(investigation_display) =
@@ -225,9 +252,10 @@ data _null_;
                 data:investigation_display,
                 row_span:4,
                 overrides:
-                    "just=l vjust=m cellwidth=2.00in
+                    "just=c vjust=m cellwidth=2.00in
                      fontfamily='&font.'
-                     fontweight=bold fontsize=9pt"
+                     fontweight=bold fontsize=9pt
+                     &coverage_border."
             );
 
         end;
@@ -239,15 +267,16 @@ data _null_;
                 data:investigation_display,
                 row_span:3,
                 overrides:
-                    "just=l vjust=m cellwidth=2.00in
+                    "just=c vjust=m cellwidth=2.00in
                      fontfamily='&font.'
-                     fontweight=bold fontsize=9pt"
+                     fontweight=bold fontsize=9pt
+                     &coverage_border."
             );
 
         end;
 
-        /* Otherwise, the investigation cell is already
-           occupied by the spanning cell from an earlier row. */
+        /* For subsequent rows, the first column is occupied
+           by the merged cell from the preceding row. */
 
 
         /* -----------------------------------------------------------
@@ -258,35 +287,40 @@ data _null_;
             data:time_point_display,
             overrides:
                 "just=c vjust=m cellwidth=1.10in
-                 fontfamily='&font.' fontsize=9pt"
+                 fontfamily='&font.' fontsize=9pt
+                 &coverage_border."
         );
 
         obj.format_cell(
             data:time_window_display,
             overrides:
                 "just=c vjust=m cellwidth=2.00in
-                 fontfamily='&font.' fontsize=9pt"
+                 fontfamily='&font.' fontsize=9pt
+                 &coverage_border."
         );
 
         obj.format_cell(
             data:eligible_display,
             overrides:
                 "just=c vjust=m cellwidth=1.20in
-                 fontfamily='&font.' fontsize=9pt"
+                 fontfamily='&font.' fontsize=9pt
+                 &coverage_border."
         );
 
         obj.format_cell(
             data:angiography_display,
             overrides:
                 "just=c vjust=m cellwidth=1.30in
-                 fontfamily='&font.' fontsize=9pt"
+                 fontfamily='&font.' fontsize=9pt
+                 &coverage_border."
         );
 
         obj.format_cell(
             data:coverage_display_ods,
             overrides:
                 "just=c vjust=m cellwidth=1.65in
-                 fontfamily='&font.' fontsize=9pt"
+                 fontfamily='&font.' fontsize=9pt
+                 &coverage_border."
         );
 
         obj.row_end();
@@ -309,7 +343,8 @@ data _null_;
             overrides:
                 "just=l vjust=t cellwidth=9.25in
                  fontfamily='&font.' fontsize=8pt
-                 background=CXFFFFFF"
+                 background=CXFFFFFF
+                 &coverage_border."
         );
 
         obj.row_end();
