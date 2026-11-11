@@ -1,0 +1,403 @@
+
+/**********************************************************************
+***********************************************************************
+
+    TABLE 3 — FOLLOW-UP SUMMARY
+    ODSOUT VERSION (MERGED CELLS)
+
+***********************************************************************
+***********************************************************************/
+
+/* Reuse existing macro variables:
+   &goutpath.  Output directory
+   &rdat8.     Date suffix
+   &font.      Font family
+*/
+
+%let T3_FILE_NUMB = 03_01;
+%let T3_TITLE = Table 3. Follow-Up, Angiography Findings, and PCI;
+
+
+/* ====================================================================
+   1. Prepare data
+   ==================================================================== */
+
+proc sort data=work.htx_import out=work.t3_sorted;
+    by row_order;
+run;
+
+data work.t3_ods_ready;
+
+    length
+        row_kind     $20
+        label_ods    $500
+        footmark     $10
+        p0_7_ods     $100
+        ge7_ods      $100
+        entire_ods   $100
+    ;
+
+    set work.t3_sorted;
+
+    row_kind  = lowcase(strip(row_type));
+    label_ods = strip(label);
+
+    /* Add superscript footnotes */
+    footmark = strip(vvalue(footnote));
+
+    if not missing(footmark) and footmark ne "." then
+        label_ods = strip(label_ods) ||
+                    '^{super ' || strip(footmark) || '}';
+
+    /* Mark subcategories for indentation */
+    is_indented = (strip(vvalue(indent)) = "1");
+
+    /* Handle numeric and character Excel imports */
+    p0_7_ods   = strip(vvalue(p0_7));
+    ge7_ods    = strip(vvalue(ge7));
+    entire_ods = strip(vvalue(entire));
+
+    if p0_7_ods   = "." then p0_7_ods   = "";
+    if ge7_ods    = "." then ge7_ods    = "";
+    if entire_ods = "." then entire_ods = "";
+
+run;
+
+
+/* ====================================================================
+   2. RTF output settings
+   ==================================================================== */
+
+options
+    orientation=landscape
+    papersize=A4
+    leftmargin=0.6in
+    rightmargin=0.6in
+    topmargin=0.6in
+    bottommargin=0.6in
+    nodate
+    nonumber
+;
+
+ods escapechar='^';
+ods listing close;
+
+title;
+footnote;
+
+
+/* ====================================================================
+   3. Create separate table header
+   ==================================================================== */
+
+ods rtf file=
+    "&goutpath.TableHeader_&T3_FILE_NUMB._&rdat8..rtf"
+    style=styles.journal
+    bodytitle;
+
+ods rtf text=
+    "^{style [just=l
+              fontfamily='&font.'
+              fontsize=14pt
+              fontweight=bold
+              foreground=cx174961]
+      &T3_TITLE.}";
+
+ods rtf close;
+
+
+/* ====================================================================
+   4. Create main table
+   ==================================================================== */
+
+ods rtf file=
+    "&goutpath.Table_&T3_FILE_NUMB._ODSOUT_&rdat8..rtf"
+    style=styles.journal
+    bodytitle;
+
+data _null_;
+
+    set work.t3_ods_ready end=last;
+
+
+    /* ---------------------------------------------------------------
+       A. Initialize table and column headers
+       --------------------------------------------------------------- */
+
+    if _N_ = 1 then do;
+
+        dcl odsout obj();
+
+        obj.table_start(
+            overrides:
+                "width=9.25in
+                 frame=box
+                 rules=all
+                 borderstyle=solid
+                 bordercolor=CXBDBDBD
+                 borderwidth=0.5pt
+                 cellspacing=0
+                 cellpadding=2pt"
+        );
+
+        obj.head_start();
+
+        obj.row_start(type:"Header");
+
+        obj.format_cell(
+            text:"Characteristic",
+            overrides:
+                "just=l vjust=m background=CXBDBDBD
+                 cellwidth=3.85in fontfamily='&font.'
+                 fontweight=bold fontsize=9pt
+                 borderstyle=solid
+                 bordercolor=CXBDBDBD
+                 borderwidth=0.5pt"
+        );
+
+        obj.format_cell(
+            text:"0-<7 years",
+            overrides:
+                "just=c vjust=m background=CXBDBDBD
+                 cellwidth=1.80in fontfamily='&font.'
+                 fontweight=bold fontsize=9pt
+                 borderstyle=solid
+                 bordercolor=CXBDBDBD
+                 borderwidth=0.5pt"
+        );
+
+        obj.format_cell(
+            text:">=7 years",
+            overrides:
+                "just=c vjust=m background=CXBDBDBD
+                 cellwidth=1.80in fontfamily='&font.'
+                 fontweight=bold fontsize=9pt
+                 borderstyle=solid
+                 bordercolor=CXBDBDBD
+                 borderwidth=0.5pt"
+        );
+
+        obj.format_cell(
+            text:"Entire follow-up",
+            overrides:
+                "just=c vjust=m background=CXBDBDBD
+                 cellwidth=1.80in fontfamily='&font.'
+                 fontweight=bold fontsize=9pt
+                 borderstyle=solid
+                 bordercolor=CXBDBDBD
+                 borderwidth=0.5pt"
+        );
+
+        obj.row_end();
+        obj.head_end();
+
+    end;
+
+
+    /* ---------------------------------------------------------------
+       B. Section headings
+          One gray cell spanning all four columns
+       --------------------------------------------------------------- */
+
+    if row_kind = "section" then do;
+
+        obj.row_start();
+
+        obj.format_cell(
+            data:label_ods,
+            column_span:4,
+            overrides:
+                "just=l vjust=m background=CXD9D9D9
+                 cellwidth=9.25in fontfamily='&font.'
+                 fontweight=bold fontsize=9pt
+                 borderstyle=solid
+                 bordercolor=CXBDBDBD
+                 borderwidth=0.5pt"
+        );
+
+        obj.row_end();
+
+    end;
+
+
+    /* ---------------------------------------------------------------
+       C. Subheadings
+          Example: Reason follow-up ended, n (%)
+       --------------------------------------------------------------- */
+
+    else if row_kind = "subheading" then do;
+
+        obj.row_start();
+
+        obj.format_cell(
+            data:label_ods,
+            column_span:4,
+            overrides:
+                "just=l vjust=m background=CXF2F2F2
+                 cellwidth=9.25in fontfamily='&font.'
+                 fontweight=bold fontsize=9pt
+                 borderstyle=solid
+                 bordercolor=CXBDBDBD
+                 borderwidth=0.5pt"
+        );
+
+        obj.row_end();
+
+    end;
+
+
+    /* ---------------------------------------------------------------
+       D. Ordinary data rows
+       --------------------------------------------------------------- */
+
+    else do;
+
+        obj.row_start();
+
+        /* Characteristic label */
+        if is_indented then do;
+
+            obj.format_cell(
+                data:label_ods,
+                overrides:
+                    "just=l vjust=m textindent=0.18in
+                     cellwidth=3.85in fontfamily='&font.'
+                     fontsize=9pt
+                     borderstyle=solid
+                     bordercolor=CXBDBDBD
+                     borderwidth=0.5pt"
+            );
+
+        end;
+
+        else do;
+
+            obj.format_cell(
+                data:label_ods,
+                overrides:
+                    "just=l vjust=m
+                     cellwidth=3.85in fontfamily='&font.'
+                     fontsize=9pt
+                     borderstyle=solid
+                     bordercolor=CXBDBDBD
+                     borderwidth=0.5pt"
+            );
+
+        end;
+
+        /* 0-<7 years */
+        obj.format_cell(
+            data:p0_7_ods,
+            overrides:
+                "just=c vjust=m cellwidth=1.80in
+                 fontfamily='&font.' fontsize=9pt
+                 borderstyle=solid
+                 bordercolor=CXBDBDBD
+                 borderwidth=0.5pt"
+        );
+
+        /* >=7 years */
+        obj.format_cell(
+            data:ge7_ods,
+            overrides:
+                "just=c vjust=m cellwidth=1.80in
+                 fontfamily='&font.' fontsize=9pt
+                 borderstyle=solid
+                 bordercolor=CXBDBDBD
+                 borderwidth=0.5pt"
+        );
+
+        /* Entire follow-up */
+        obj.format_cell(
+            data:entire_ods,
+            overrides:
+                "just=c vjust=m cellwidth=1.80in
+                 fontfamily='&font.' fontsize=9pt
+                 borderstyle=solid
+                 bordercolor=CXBDBDBD
+                 borderwidth=0.5pt"
+        );
+
+        obj.row_end();
+
+    end;
+
+
+    /* ---------------------------------------------------------------
+       E. Notes and footnotes
+          Separate merged cells
+       --------------------------------------------------------------- */
+
+    if last then do;
+
+        /* General notes */
+        obj.row_start();
+
+        obj.format_cell(
+            text:
+                "Notes: Unless otherwise specified, patient-level percentages are calculated using the number of patients at the beginning of the respective follow-up period. Percentages for subcategories are calculated relative to their parent category. Angiography-level percentages use the number of included angiographies.",
+            column_span:4,
+            overrides:
+                "just=l vjust=t cellwidth=9.25in
+                 fontfamily='&font.' fontsize=8pt
+                 background=CXFFFFFF
+                 borderstyle=solid
+                 bordercolor=CXBDBDBD
+                 borderwidth=0.5pt"
+        );
+
+        obj.row_end();
+
+
+        /* Footnote a: diagnosis denominator */
+        obj.row_start();
+
+        obj.format_cell(
+            text:
+                "^{super a} Denominator: Patients with at least one included angiography with a non-missing, conclusive FYND during the period.",
+            column_span:4,
+            overrides:
+                "just=l vjust=t cellwidth=9.25in
+                 fontfamily='&font.' fontsize=8pt
+                 background=CXFFFFFF
+                 borderstyle=solid
+                 bordercolor=CXBDBDBD
+                 borderwidth=0.5pt"
+        );
+
+        obj.row_end();
+
+
+        /* Footnote b: PCI denominator */
+        obj.row_start();
+
+        obj.format_cell(
+            text:
+                "^{super b} Denominator: Patients with at least one included angiography showing FYND >=2 during the period.",
+            column_span:4,
+            overrides:
+                "just=l vjust=t cellwidth=9.25in
+                 fontfamily='&font.' fontsize=8pt
+                 background=CXFFFFFF
+                 borderstyle=solid
+                 bordercolor=CXBDBDBD
+                 borderwidth=0.5pt"
+        );
+
+        obj.row_end();
+
+
+        /* End table */
+        obj.table_end();
+
+    end;
+
+run;
+
+ods rtf close;
+ods listing;
+
+
+/**********************************************************************
+    END OF TABLE 3 — ODSOUT VERSION
+**********************************************************************/
