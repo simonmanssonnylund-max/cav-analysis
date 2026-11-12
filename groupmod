@@ -1,0 +1,74 @@
+
+msm_dat11 <- msm_dat10 %>%
+  arrange(lopnr, years) %>%
+  group_by(lopnr) %>%
+  mutate(
+    age_at_tx_tmp = first(age)
+  ) %>%
+  group_modify(~ {
+
+    d <- .x %>% arrange(years)
+
+    # Last observed time (censoring or death/re-transplantation)
+    end_year <- max(d$years)
+
+    # Annual time points since transplantation
+    annual_years <- seq_len(floor(end_year))
+
+    # Exclude the final observation time
+    annual_years <- annual_years[
+      annual_years < end_year - 1e-10
+    ]
+
+    # Do not insert rows where an observation already exists
+    annual_years <- annual_years[
+      !vapply(
+        annual_years,
+        function(t) any(abs(d$years - t) < 1e-8),
+        logical(1)
+      )
+    ]
+
+    # Artificial observations for covariate updates
+    artificial <- tibble(
+      years = as.numeric(annual_years),
+      state = 99,
+      firstobs = 0,
+      artificial = TRUE
+    )
+
+    bind_rows(
+      d %>% mutate(artificial = FALSE),
+      artificial
+    ) %>%
+      arrange(years) %>%
+      mutate(
+        # Age at transplantation
+        age_at_tx_tmp = first(na.omit(age_at_tx_tmp)),
+
+        # Update attained age at EVERY row
+        age = as.numeric(age_at_tx_tmp) + years,
+
+        # Patient-level follow-up variable
+        obs_yrs = first(na.omit(obs_yrs)),
+
+        # Recompute the time-dependent 21-day indicator
+        post_cut = factor(
+          if_else(
+            years < 21 / 365.25,
+            "Early",
+            "After"
+          ),
+          levels = c("After", "Early")
+        )
+      )
+
+  }) %>%
+  mutate(
+    sex = first(na.omit(sex)),
+    dage = first(na.omit(dage)),
+    dsex = first(na.omit(dsex)),
+    unit = first(na.omit(unit)),
+    tx_era = first(na.omit(tx_era))
+  ) %>%
+  ungroup()
