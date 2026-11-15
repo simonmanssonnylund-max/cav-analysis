@@ -1,0 +1,69 @@
+library(dplyr)
+library(tidyr)
+
+# ==============================================================================
+# 1. SELECT FIRST ANGIOGRAPHY PER PATIENT
+# ==============================================================================
+
+angio_flag <- if ("included_angiography" %in% names(test2.7)) {
+  "included_angiography"
+} else {
+  "included_angio"
+}
+
+first_angio <- test2.7 %>%
+  ungroup() %>%
+  filter(
+    fup_yrs >= 2,
+    yrs >= 0.5,
+    yrs < 2,
+    .data[[angio_flag]] %in% TRUE
+  ) %>%
+  arrange(lopnr, yrs) %>%
+  distinct(lopnr, .keep_all = TRUE) %>%
+  mutate(
+    cav_proxy = replace_na(as.character(cav_proxy), "Missing")
+  )
+
+
+# ==============================================================================
+# 2. SUMMARIZE CAV FINDINGS BY CENTER
+# ==============================================================================
+
+cav_by_center <- first_angio %>%
+  count(unit_1, cav_proxy, name = "n") %>%
+  complete(
+    unit_1,
+    cav_proxy,
+    fill = list(n = 0)
+  ) %>%
+  group_by(unit_1) %>%
+  mutate(
+    N = sum(n),
+    pct = 100 * n / N,
+    n_pct = sprintf("%d (%.1f%%)", n, pct)
+  ) %>%
+  ungroup()
+
+
+# ==============================================================================
+# 3. DISPLAY COMPARISON TABLE
+# ==============================================================================
+
+cav_table <- cav_by_center %>%
+  select(unit_1, cav_proxy, n_pct) %>%
+  pivot_wider(
+    names_from = unit_1,
+    values_from = n_pct
+  ) %>%
+  arrange(cav_proxy)
+
+cav_table
+
+
+# ==============================================================================
+# 4. NUMBER OF PATIENTS PER CENTER
+# ==============================================================================
+
+first_angio %>%
+  count(unit_1, name = "N")
