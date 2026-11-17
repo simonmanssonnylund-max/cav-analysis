@@ -1,0 +1,189 @@
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+# ==============================================================================
+# 1. PREPARE OBSERVED STATES ----
+# ==============================================================================
+
+# Use the original, non-monotone observed states.
+# State coding:
+#   1  = FYND 1
+#   2  = FYND 2
+#   3  = FYND >=3
+#   4  = Death/Re-HTx
+#   99 = Unknown CAV state
+#
+# Artificial covariate-update observations must not be counted.
+
+dat_obs <- dat2 %>%
+  ungroup() %>%
+  mutate(
+    state = as.integer(as.character(state))
+  )
+
+# Remove artificial observations, if the indicator exists.
+if ("artificial" %in% names(dat_obs)) {
+  dat_obs <- dat_obs %>%
+    filter(!coalesce(as.logical(artificial), FALSE))
+}
+
+# Retain only observed states.
+dat_obs <- dat_obs %>%
+  filter(state %in% 1:4) %>%
+  arrange(lopnr, years)
+
+
+# ==============================================================================
+# 2. IDENTIFY CONSECUTIVE OBSERVED TRANSITIONS ----
+# ==============================================================================
+
+observed_transitions <- dat_obs %>%
+  group_by(lopnr) %>%
+  mutate(
+    from_state = lag(state),
+    to_state = state
+  ) %>%
+  filter(!is.na(from_state)) %>%
+  ungroup()
+
+
+# ==============================================================================
+# 3. COUNT TRANSITIONS AND CONSTRUCT MATRIX ----
+# ==============================================================================
+
+state_labels <- c(
+  "FYND = 1",
+  "FYND = 2",
+  "FYND >=3",
+  "Death/Re-HTx"
+)
+
+transition_counts <- observed_transitions %>%
+  count(from_state, to_state, name = "n") %>%
+  complete(
+    from_state = 1:4,
+    to_state = 1:4,
+    fill = list(n = 0L)
+  ) %>%
+  mutate(
+    from_state = factor(
+      from_state,
+      levels = 1:4,
+      labels = state_labels
+    ),
+    to_state = factor(
+      to_state,
+      levels = 1:4,
+      labels = state_labels
+    )
+  )
+
+transition_matrix <- xtabs(
+  n ~ from_state + to_state,
+  data = transition_counts
+)
+
+
+# ==============================================================================
+# 4. SUMMARIZE DOWNWARD TRANSITIONS ----
+# ==============================================================================
+
+# Only transitions between conclusive CAV observations.
+# Death/Re-HTx transitions are excluded from these denominators.
+#
+# Unchanged states ARE included in the denominator.
+
+reversal_summary <- observed_transitions %>%
+  filter(
+    from_state %in% 1:3,
+    to_state %in% 1:3
+  ) %>%
+  summarise(
+    n_pairs = n(),
+
+    n_decreases = sum(to_state < from_state),
+
+    pct_decreases = if (n_pairs > 0) {
+      100 * n_decreases / n_pairs
+    } else {
+      NA_real_
+    },
+
+    n_patients_with_decrease = n_distinct(
+      lopnr[to_state < from_state]
+    ),
+
+    n_patients_with_pairs = n_distinct(lopnr),
+
+    .groups = "drop"
+  )
+
+
+# ==============================================================================
+# 5. FORMAT TRANSITION MATRIX WITH TOTALS ----
+# ==============================================================================
+
+transition_table <- transition_matrix %>%
+  addmargins() %>%
+  as.data.frame.matrix() %>%
+  rownames_to_column("From / To") %>%
+  rename(Total = Sum) %>%
+  mutate(
+    `From / To` = if_else(
+      `From / To` == "Sum",
+      "Total",
+      `From / To`
+    )
+  ) %>%
+  mutate(
+    across(-`From / To`, as.character)
+  )
+
+
+# ==============================================================================
+# 6. APPEND DOWNWARD TRANSITION SUMMARY ----
+# ==============================================================================
+
+summary_rows <- as_tibble(
+  matrix(
+    "",
+    nrow = 2,
+    ncol = ncol(transition_table)
+  ),
+  .name_repair = "minimal"
+)
+
+names(summary_rows) <- names(transition_table)
+
+summary_rows[["From / To"]] <- c(
+  "Downward transitions, n (%)",
+  "Patients with >=1 downward transition, n"
+)
+
+summary_rows[["Total"]] <- c(
+  sprintf(
+    "%d (%.1f%%)",
+    reversal_summary$n_decreases,
+    reversal_summary$pct_decreases
+  ),
+  as.character(
+    reversal_summary$n_patients_with_decrease
+  )
+)
+
+# Final presentation table
+transition_table_final <- bind_rows(
+  transition_table,
+  summary_rows
+)
+
+
+# ==============================================================================
+# 7. DISPLAY RESULTS ----
+# ==============================================================================
+
+transition_table_final
+
+# Additional numerical summary
+reversal_summary
