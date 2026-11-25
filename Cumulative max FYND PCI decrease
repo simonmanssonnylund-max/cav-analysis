@@ -1,0 +1,123 @@
+library(dplyr)
+
+# ==============================================================================
+# 1. IDENTIFY DECREASES RELATIVE TO HISTORICAL MAXIMUM ----
+# ==============================================================================
+
+mf <- model.frame(fit_adj)
+
+pci_pairs_max <- mf %>%
+  transmute(
+    lopnr = `(subject)`,
+    years = `(time)`,
+    state = as.integer(as.character(`(state)`)),
+    prior_pci = prior_pci,
+    pci_logtime = pci_logtime
+  ) %>%
+  filter(
+    state %in% 1:3,
+    years > 0
+  ) %>%
+  group_by(lopnr) %>%
+  arrange(years, .by_group = TRUE) %>%
+  mutate(
+    prev_state = lag(state),
+    prev_years = lag(years),
+    prev_max_state = lag(cummax(state)),
+
+    # Decrease relative to preceding observation
+    downward_consecutive = state < prev_state,
+
+    # Decrease relative to historical maximum
+    downward_max = state < prev_max_state,
+
+    # Distinguish persistent from newly occurring decreases
+    persistent_decrease = downward_max & !downward_consecutive,
+
+    # Eligibility for a decrease
+    can_decrease = prev_max_state %in% 2:3,
+
+    years_since_pci = if_else(
+      prior_pci == 1,
+      expm1(pci_logtime),
+      NA_real_
+    )
+  ) %>%
+  filter(!is.na(prev_max_state)) %>%
+  ungroup()
+
+
+# ==============================================================================
+# 2. CATEGORISE TIME SINCE PCI ----
+# ==============================================================================
+
+pci_groups <- c(
+  "No previous PCI",
+  "0–<0.5 years",
+  "0.5–<1 year",
+  "1–<2 years",
+  "2–<3 years",
+  "3+ years"
+)
+
+pci_pairs_max <- pci_pairs_max %>%
+  mutate(
+    pci_group = case_when(
+      prior_pci == 0       ~ "No previous PCI",
+      years_since_pci < 0.5 ~ "0–<0.5 years",
+      years_since_pci < 1   ~ "0.5–<1 year",
+      years_since_pci < 2   ~ "1–<2 years",
+      years_since_pci < 3   ~ "2–<3 years",
+      years_since_pci >= 3  ~ "3+ years"
+    ),
+    pci_group = factor(
+      pci_group,
+      levels = pci_groups
+    )
+  )
+
+
+# ==============================================================================
+# 3. SUMMARY BY TIME SINCE PCI ----
+# ==============================================================================
+
+pci_summary_max <- pci_pairs_max %>%
+  group_by(pci_group, .drop = FALSE) %>%
+  summarise(
+    n_patients = n_distinct(lopnr),
+    n_pairs = n(),
+    n_possible_decrease = sum(can_decrease),
+    n_downward_consecutive = sum(downward_consecutive),
+    n_downward_persistent = sum(persistent_decrease),
+    n_downward_max = sum(downward_max),
+    n_patients_downward = n_distinct(lopnr[downward_max]),
+    pct_downward = if_else(
+      n_possible_decrease > 0,
+      100 * n_downward_max / n_possible_decrease,
+      NA_real_
+    ),
+    .groups = "drop"
+  )
+
+print(pci_summary_max, width = Inf)
+
+
+# ==============================================================================
+# 4. STRATIFY BY HIGHEST PREVIOUSLY OBSERVED STATE ----
+# ==============================================================================
+
+pci_summary_max_strat <- pci_pairs_max %>%
+  filter(can_decrease) %>%
+  group_by(pci_group, prev_max_state) %>%
+  summarise(
+    n_patients = n_distinct(lopnr),
+    n_pairs = n(),
+    n_downward_consecutive = sum(downward_consecutive),
+    n_downward_persistent = sum(persistent_decrease),
+    n_downward_max = sum(downward_max),
+    pct_downward = 100 * n_downward_max / n_pairs,
+    .groups = "drop"
+  ) %>%
+  arrange(prev_max_state, pci_group)
+
+print(pci_summary_max_strat, n = Inf, width = Inf)
