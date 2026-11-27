@@ -1,160 +1,731 @@
 library(msm)
-
-# ============================================================
-# 1. LOCAL COPIES OF THE ORIGINAL FUNCTIONS
-# ============================================================
-
-ns <- asNamespace("msm")
-
-patch_env <- new.env(parent = ns)
-
-expected_fixed   <- get("expected.msm", envir = ns)
-observed_fixed   <- get("observed.msm", envir = ns)
-covhist_fixed    <- get("get.covhist", envir = ns)
-prevalence_fixed <- msm::prevalence.msm
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(expm)
 
 
 # ============================================================
-# 2. HELPER FOR REPLACING COMPLETE EXPRESSIONS
+# 1. SETTINGS
 # ============================================================
 
-replace_expression <- function(fun, pattern, replacement) {
+cut_time <- 45 / 365.25
+max_years <- 7
 
-  src <- paste(
-    deparse(body(fun), width.cutoff = 500L),
-    collapse = "\n"
-  )
+times <- sort(unique(c(
+  seq(0, max_years, by = 0.05),
+  cut_time
+)))
 
-  matches <- gregexpr(
-    pattern,
-    src,
-    perl = TRUE
-  )[[1]]
+col_obs  <- "#9EB8B7"
+col_pred <- "#651220"
+
+state_labels <- c(
+  "CAV 0",
+  "CAV 1",
+  "CAV \u2265 2",
+  "Death/Re-HTx"
+)
+
+
+# ============================================================
+# 2. CORRECTED POPULATION PREVALENCE FUNCTION
+# ============================================================
+
+prevalence_fixed <- function(
+    x,
+    times,
+    cut_time = 45 / 365.25,
+    censtime = Inf
+) {
+
+  mf <- x$data$mf
+
+  qcov_names <- attr(mf, "covnames.q")
+  ecov_names <- attr(mf, "covnames.e")
+
+  nstates <- x$qmodel$nstates
 
   stopifnot(
-    length(matches) == 1L,
-    matches[1] != -1L
+    nstates == 4,
+    x$emodel$misc,
+    all(c("sex", "age", "tx_era", "post_cut") %in%
+          qcov_names),
+    "prior_pci" %in% ecov_names
   )
 
-  src <- sub(
-    pattern,
-    replacement,
-    src,
-    perl = TRUE
+  times <- sort(unique(times))
+
+  stopifnot(
+    all(is.finite(times)),
+    min(times) == 0
   )
 
-  body(fun) <- parse(text = src)[[1]]
+  ids <- unique(mf[["(subject)"]])
 
-  fun
+  n_patients <- length(ids)
+  n_times <- length(times)
+
+  if (length(censtime) == 1L) {
+    censtime <- rep(censtime, n_patients)
+  }
+
+  stopifnot(length(censtime) == n_patients)
+
+  # Initial latent-state distribution
+
+  initprobs <- as.numeric(x$emodel$initprobs)
+
+  stopifnot(
+    length(initprobs) == nstates,
+    abs(sum(initprobs) - 1) < 1e-8,
+    abs(initprobs[1] - 1) < 1e-8
+  )
+
+
+  # ----------------------------------------------------------
+  # 2.1. Observed states
+  # ----------------------------------------------------------
+
+  raw_state <- mf[["(state)"]]
+
+  # Reproduce prevalence.msm's convention:
+  # replace censored states with Viterbi estimates,
+  # but retain all genuinely observed states.
+
+  vit_state <- viterbi.msm(x)$fitted
+
+  stopifnot(length(vit_state) == nrow(mf))
+
+  observed_state <- raw_state
+
+  censored <- raw_state %in% x$cmodel$censor
+
+  observed_state[censored] <- vit_state[censored]
+
+
+  # ----------------------------------------------------------
+  # 2.2. Storage
+  # ----------------------------------------------------------
+
+  observed_mat <- matrix(
+    NA_integer_,
+    nrow = n_patients,
+    ncol = n_times
+  )
+
+  expected_mat <- matrix(
+    0,
+    nrow = n_times,
+    ncol = nstates
+  )
+
+  expected_latent_mat <- matrix(
+    0,
+    nrow = n_times,
+    ncol = nstates
+  )
+
+  recency_mat <- matrix(
+    NA_real_,
+    nrow = n_patients,
+    ncol = n_times
+  )
+
+  assessed_mat <- matrix(
+    NA_integer_,
+    nrow = n_patients,
+    ncol = n_times
+  )
+
+
+  # ----------------------------------------------------------
+  # 2.3. Cache transition and misclassification matrices
+  # ----------------------------------------------------------
+
+  q_cache <- new.env(hash = TRUE, parent = emptyenv())
+  p_cache <- new.env(hash = TRUE, parent = emptyenv())
+  e_cache <- new.env(hash = TRUE, parent = emptyenv())
+
+  cov_key <- function(covs) {
+
+    paste(
+      vapply(
+        covs,
+        function(z) {
+          if (is.numeric(z)) {
+            sprintf("%.17g", z)
+          } else {
+            as.character(z)
+          }
+        },
+        character(1)
+      ),
+      collapse = "|"
+    )
+  }
+
+  get_Q <- function(covs) {
+
+    key <- cov_key(covs)
+
+    if (!exists(key, envir = q_cache, inherits = FALSE)) {
+
+      Q_i <- qmatrix.msm(
+        x,
+        covariates = covs,
+        ci = "none"
+      )
+
+      assign(
+        key,
+        unclass(Q_i),
+        envir = q_cache
+      )
+    }
+
+    get(key, envir = q_cache, inherits = FALSE)
+  }
+
+  get_P <- function(covs, dt) {
+
+    if (dt == 0) {
+      return(diag(nstates))
+    }
+
+    key <- paste(
+      cov_key(covs),
+      sprintf("%.12f", dt),
+      sep = "::"
+    )
+
+    if (!exists(key, envir = p_cache, inherits = FALSE)) {
+
+      P_i <- expm::expm(get_Q(covs) * dt)
+
+      assign(key, P_i, envir = p_cache)
+    }
+
+    get(key, envir = p_cache, inherits = FALSE)
+  }
+
+  get_E <- function(covs) {
+
+    key <- cov_key(covs)
+
+    if (!exists(key, envir = e_cache, inherits = FALSE)) {
+
+      E_i <- ematrix.msm(
+        x,
+        covariates = covs,
+        ci = "none"
+      )
+
+      assign(
+        key,
+        unclass(E_i),
+        envir = e_cache
+      )
+    }
+
+    get(key, envir = e_cache, inherits = FALSE)
+  }
+
+
+  # ----------------------------------------------------------
+  # 2.4. Calculate patient-specific prevalences
+  # ----------------------------------------------------------
+
+  subject_rows <- split(
+    seq_len(nrow(mf)),
+    factor(
+      match(mf[["(subject)"]], ids),
+      levels = seq_along(ids)
+    )
+  )
+
+  for (i in seq_along(ids)) {
+
+    ind <- subject_rows[[i]]
+
+    ind <- ind[order(mf[["(time)"]][ind])]
+
+    dat_i <- mf[ind, , drop = FALSE]
+
+    t_i <- dat_i[["(time)"]]
+
+    raw_i <- raw_state[ind]
+    obs_i <- observed_state[ind]
+
+    last_time  <- tail(t_i, 1)
+    last_state <- tail(raw_i, 1)
+
+    stopifnot(
+      abs(t_i[1]) < 1e-10,
+      raw_i[1] == 1
+    )
+
+
+    # --------------------------------------------------------
+    # 2.4.1. Determine who contributes at each time
+    # --------------------------------------------------------
+
+    # Patients with a terminal living state contribute
+    # until their last recorded observation.
+    #
+    # Patients who died or underwent re-HTx remain in the
+    # population until their administrative censoring time.
+
+    eligible <- times <= last_time |
+      (last_state == 4 & times <= censtime[i])
+
+    eligible_ind <- which(eligible)
+
+    if (length(eligible_ind) == 0L) {
+      next
+    }
+
+    eval_times <- times[eligible_ind]
+
+    end_time <- max(eval_times)
+
+
+    # --------------------------------------------------------
+    # 2.4.2. Observed prevalence
+    # --------------------------------------------------------
+
+    # Last observation carried forward (interp = "start").
+
+    obs_index <- findInterval(eval_times, t_i)
+
+    observed_mat[i, eligible_ind] <- obs_i[obs_index]
+
+
+    # --------------------------------------------------------
+    # 2.4.3. Recency of conclusive CAV ascertainment
+    # --------------------------------------------------------
+
+    # Only genuine post-transplant CAV observations count.
+    #
+    # Exclude:
+    #   - Baseline state
+    #   - State 99
+    #   - Death/re-HTx
+    #   - Viterbi-imputed states
+
+    assessment_times <- sort(unique(
+      t_i[t_i > 0 & raw_i %in% 1:3]
+    ))
+
+    alive <- observed_mat[i, eligible_ind] %in% 1:3
+
+    last_assess_index <- findInterval(
+      eval_times,
+      assessment_times
+    )
+
+    assessed <- last_assess_index > 0
+
+    assessed_mat[
+      i,
+      eligible_ind[alive]
+    ] <- as.integer(assessed[alive])
+
+    valid_recency <- alive & assessed
+
+    if (any(valid_recency)) {
+
+      recency_mat[
+        i,
+        eligible_ind[valid_recency]
+      ] <-
+        eval_times[valid_recency] -
+        assessment_times[
+          last_assess_index[valid_recency]
+        ]
+    }
+
+
+    # --------------------------------------------------------
+    # 2.4.4. Construct complete covariate history
+    # --------------------------------------------------------
+
+    age_at_tx <- dat_i$age[1] - t_i[1]
+
+    # Annual age updates beyond the patient's final
+    # recorded observation.
+
+    annual_times <- seq(
+      0,
+      ceiling(max(times)),
+      by = 1
+    )
+
+    future_age_times <- annual_times[
+      annual_times > last_time &
+      annual_times <= end_time
+    ]
+
+    # Include the 45-day cutoff for EVERY patient,
+    # even patients who died before day 45.
+
+    cutoff <- if (cut_time <= end_time) {
+      cut_time
+    } else {
+      numeric(0)
+    }
+
+    hist_times <- sort(unique(c(
+      0,
+      t_i[t_i <= end_time],
+      cutoff,
+      future_age_times
+    )))
+
+    hist_index <- findInterval(hist_times, t_i)
+
+    hist_i <- dat_i[hist_index, , drop = FALSE]
+
+    # Retain recorded age values at actual observation times.
+    # At newly inserted time points, calculate attained age.
+
+    inserted <- !hist_times %in% t_i
+
+    hist_i$age[inserted] <-
+      age_at_tx + hist_times[inserted]
+
+    # Explicitly enforce the deterministic early/late effect.
+
+    hist_i$post_cut <- factor(
+      ifelse(
+        hist_times < cut_time,
+        "Early",
+        "After"
+      ),
+      levels = levels(mf$post_cut)
+    )
+
+    stopifnot(!anyNA(hist_i$post_cut))
+
+    # prior_pci is inherited from the most recent recorded
+    # observation. It is not extrapolated to future PCIs.
+
+
+    # --------------------------------------------------------
+    # 2.4.5. Construct patient-specific covariate lists
+    # --------------------------------------------------------
+
+    qcovs_i <- lapply(
+      seq_len(nrow(hist_i)),
+      function(k) {
+        as.list(
+          hist_i[k, qcov_names, drop = FALSE]
+        )
+      }
+    )
+
+    ecovs_i <- lapply(
+      seq_len(nrow(hist_i)),
+      function(k) {
+        as.list(
+          hist_i[k, ecov_names, drop = FALSE]
+        )
+      }
+    )
+
+
+    # --------------------------------------------------------
+    # 2.4.6. Propagate latent state probabilities
+    # --------------------------------------------------------
+
+    # Combine covariate change times with prediction times.
+
+    grid_i <- sort(unique(c(
+      hist_times,
+      eval_times
+    )))
+
+    history_index <- findInterval(
+      grid_i,
+      hist_times
+    )
+
+    prediction_index <- match(
+      grid_i,
+      times
+    )
+
+    pi_i <- matrix(
+      initprobs,
+      nrow = 1
+    )
+
+    for (k in seq_along(grid_i)) {
+
+      current_time <- grid_i[k]
+
+      if (k > 1L) {
+
+        dt <- grid_i[k] - grid_i[k - 1L]
+
+        # Intensity covariates at the START of the interval.
+
+        P_i <- get_P(
+          covs = qcovs_i[[
+            history_index[k - 1L]
+          ]],
+          dt = dt
+        )
+
+        pi_i <- pi_i %*% P_i
+      }
+
+      j <- prediction_index[k]
+
+      if (!is.na(j) && eligible[j]) {
+
+        # Latent prevalence
+
+        expected_latent_mat[j, ] <-
+          expected_latent_mat[j, ] +
+          as.numeric(pi_i)
+
+        # Expected observed prevalence
+        #
+        # Baseline is assumed to be genuinely known CAV 0,
+        # so do not apply misclassification at t = 0.
+
+        if (current_time == 0) {
+
+          pi_obs_i <- pi_i
+
+        } else {
+
+          E_i <- get_E(
+            ecovs_i[[history_index[k]]]
+          )
+
+          pi_obs_i <- pi_i %*% E_i
+        }
+
+        expected_mat[j, ] <-
+          expected_mat[j, ] +
+          as.numeric(pi_obs_i)
+      }
+    }
+
+    if (i %% 100 == 0 || i == n_patients) {
+
+      message(
+        "Processed ",
+        i,
+        " / ",
+        n_patients,
+        " patients"
+      )
+    }
+  }
+
+
+  # ----------------------------------------------------------
+  # 2.5. Aggregate observed state counts
+  # ----------------------------------------------------------
+
+  obs_counts <- t(apply(
+    observed_mat,
+    2,
+    function(z) {
+      as.numeric(
+        table(factor(z, levels = seq_len(nstates)))
+      )
+    }
+  ))
+
+  obs_total <- rowSums(obs_counts)
+
+  exp_total <- rowSums(expected_mat)
+
+  latent_total <- rowSums(expected_latent_mat)
+
+  colnames(obs_counts) <-
+    colnames(expected_mat) <-
+    colnames(expected_latent_mat) <-
+    paste("State", seq_len(nstates))
+
+  rownames(obs_counts) <-
+    rownames(expected_mat) <-
+    rownames(expected_latent_mat) <-
+    times
+
+
+  # ----------------------------------------------------------
+  # 2.6. Calculate percentages
+  # ----------------------------------------------------------
+
+  obs_percent <- 100 * sweep(
+    obs_counts,
+    1,
+    obs_total,
+    "/"
+  )
+
+  exp_percent <- 100 * sweep(
+    expected_mat,
+    1,
+    exp_total,
+    "/"
+  )
+
+  latent_percent <- 100 * sweep(
+    expected_latent_mat,
+    1,
+    latent_total,
+    "/"
+  )
+
+
+  # ----------------------------------------------------------
+  # 2.7. Numerical checks
+  # ----------------------------------------------------------
+
+  stopifnot(
+    max(abs(obs_total - exp_total)) < 1e-6,
+    max(abs(obs_total - latent_total)) < 1e-6
+  )
+
+
+  # ----------------------------------------------------------
+  # 2.8. Summarise recency of CAV ascertainment
+  # ----------------------------------------------------------
+
+  safe_quantile <- function(z, prob) {
+
+    if (all(is.na(z))) {
+      return(NA_real_)
+    }
+
+    as.numeric(
+      quantile(
+        z,
+        probs = prob,
+        na.rm = TRUE
+      )
+    )
+  }
+
+  recency_summary <- data.frame(
+
+    years = times,
+
+    median = apply(
+      recency_mat, 2,
+      safe_quantile, prob = 0.50
+    ),
+
+    q25 = apply(
+      recency_mat, 2,
+      safe_quantile, prob = 0.25
+    ),
+
+    q75 = apply(
+      recency_mat, 2,
+      safe_quantile, prob = 0.75
+    ),
+
+    q10 = apply(
+      recency_mat, 2,
+      safe_quantile, prob = 0.10
+    ),
+
+    q90 = apply(
+      recency_mat, 2,
+      safe_quantile, prob = 0.90
+    ),
+
+    n_alive = colSums(
+      !is.na(assessed_mat)
+    ),
+
+    n_assessed = colSums(
+      assessed_mat == 1,
+      na.rm = TRUE
+    ),
+
+    n_unassessed = colSums(
+      assessed_mat == 0,
+      na.rm = TRUE
+    )
+  )
+
+  recency_summary$pct_unassessed <-
+    100 * recency_summary$n_unassessed /
+    recency_summary$n_alive
+
+
+  # ----------------------------------------------------------
+  # 2.9. Return results
+  # ----------------------------------------------------------
+
+  list(
+
+    "Observed" = cbind(
+      obs_counts,
+      Total = obs_total
+    ),
+
+    "Expected" = cbind(
+      expected_mat,
+      Total = exp_total
+    ),
+
+    "Observed percentages" = obs_percent,
+
+    "Expected percentages" = exp_percent,
+
+    "Expected latent percentages" = latent_percent,
+
+    "Recency" = recency_summary,
+
+    "Times" = times
+  )
 }
 
 
 # ============================================================
-# 3. FIX MISCLASSIFICATION COVARIATES
+# 3. RUN PREVALENCE ASSESSMENT
 # ============================================================
-
-expected_fixed <- replace_expression(
-
-  fun = expected_fixed,
-
-  pattern = paste0(
-    "ecovs\\s*<-\\s*",
-    "if\\s*\\(length\\(ctimes\\)\\s*==\\s*0\\)",
-    "\\s*ccovs\\s*else\\s*",
-    "ccovs\\[\\[length\\(ccovs\\)\\]\\]"
-  ),
-
-  replacement = paste0(
-    'ecovs <- ccovs[[findInterval(times[j], ctimes) + 1L]]',
-    '[attr(x$data$mf, "covnames.e")]'
-  )
-)
-
-
-# ============================================================
-# 4. FIX ALIGNMENT OF COVARIATE HISTORIES
-# ============================================================
-
-covhist_fixed <- replace_expression(
-
-  fun = covhist_fixed,
-
-  pattern = paste0(
-    "change\\.times\\s*<-\\s*split\\(",
-    "[^\\n]+"
-  ),
-
-  replacement = paste0(
-    "change.times <- split(",
-    "change.times[keep & !(first | last)], ",
-    "factor(subj[keep & !(first | last)], ",
-    "levels = unique(subj)), ",
-    "drop = FALSE)"
-  )
-)
-
-
-# ============================================================
-# 5. LINK CORRECTED FUNCTIONS
-# ============================================================
-
-environment(expected_fixed)   <- patch_env
-environment(observed_fixed)   <- patch_env
-environment(covhist_fixed)    <- patch_env
-environment(prevalence_fixed) <- patch_env
-
-patch_env$expected.msm <- expected_fixed
-patch_env$observed.msm <- observed_fixed
-patch_env$get.covhist  <- covhist_fixed
-
-
-# ============================================================
-# 6. CHECK COVARIATE HISTORIES
-# ============================================================
-
-ch <- covhist_fixed(fit_constant)
-
-stopifnot(
-  length(ch$hist) ==
-    length(unique(fit_constant$data$mf[["(subject)"]]))
-)
-
-
-# ============================================================
-# 7. CALCULATE PREVALENCES
-# ============================================================
-
-cut_time <- 45 / 365.25
-
-times <- sort(unique(c(
-  seq(0, 7, by = 0.1),
-  cut_time
-)))
 
 prev_constant <- prevalence_fixed(
-  fit_constant,
-  times      = times,
-  timezero   = 0,
-  covariates = "population",
-  interp     = "start",
-  ci         = "none"
+
+  x = fit_constant,
+
+  times = times,
+
+  cut_time = cut_time,
+
+  censtime = Inf
 )
 
 
 # ============================================================
-# 8. RESULTS
+# 4. INSPECT RESULTS
 # ============================================================
 
 prev_constant$Observed
+
 prev_constant$Expected
 
 prev_constant$`Observed percentages`
+
 prev_constant$`Expected percentages`
 
+prev_constant$`Expected latent percentages`
 
-# ============================================================
-# 9. NUMERICAL CHECKS
-# ============================================================
+prev_constant$Recency
+
+
+# Check that observed and expected population sizes agree
 
 all.equal(
   unname(prev_constant$Observed[, "Total"]),
@@ -162,7 +733,346 @@ all.equal(
   tolerance = 1e-8
 )
 
+
+# Check that expected state probabilities sum to 100%
+
 range(
   rowSums(prev_constant$`Expected percentages`),
   na.rm = TRUE
+)
+
+
+# ============================================================
+# 5. PREPARE DATA FOR DIAGNOSTIC FIGURE
+# ============================================================
+
+prev_df <- bind_rows(
+
+  as.data.frame(
+    prev_constant$`Observed percentages`
+  ) %>%
+    mutate(
+      years = times,
+      type = "Observed"
+    ),
+
+  as.data.frame(
+    prev_constant$`Expected percentages`
+  ) %>%
+    mutate(
+      years = times,
+      type = "Model-predicted"
+    )
+
+) %>%
+
+  pivot_longer(
+    cols = starts_with("State"),
+    names_to = "state",
+    values_to = "prevalence"
+  ) %>%
+
+  mutate(
+
+    state = factor(
+      state,
+      levels = paste("State", 1:4),
+      labels = state_labels
+    ),
+
+    type = factor(
+      type,
+      levels = c(
+        "Observed",
+        "Model-predicted"
+      )
+    )
+  )
+
+recency_df <- prev_constant$Recency
+
+
+# ============================================================
+# 6. COMMON PLOT THEME
+# ============================================================
+
+theme_common <- theme_minimal(
+
+  base_size = 11,
+
+  base_family = "Aptos"
+
+) +
+
+  theme(
+
+    panel.grid.minor = element_blank(),
+
+    panel.grid.major.x = element_blank(),
+
+    panel.grid.major.y = element_line(
+      colour = "#E8E8E8",
+      linewidth = 0.35
+    ),
+
+    panel.border = element_rect(
+      colour = "#BDBDBD",
+      fill = NA,
+      linewidth = 0.5
+    ),
+
+    strip.text = element_text(
+      face = "bold",
+      size = 11
+    ),
+
+    axis.title = element_text(
+      size = 11
+    ),
+
+    axis.text = element_text(
+      colour = "#333333"
+    ),
+
+    plot.title = element_text(
+      face = "bold",
+      size = 11
+    ),
+
+    legend.position = "bottom",
+
+    legend.title = element_blank(),
+
+    legend.key.width = grid::unit(1.3, "cm"),
+
+    plot.margin = margin(6, 8, 6, 8)
+  )
+
+
+# ============================================================
+# 7. FOUR-PANEL PREVALENCE PLOT
+# ============================================================
+
+p_prev <- ggplot(
+
+  prev_df,
+
+  aes(
+    x = years,
+    y = prevalence,
+    colour = type,
+    linetype = type
+  )
+
+) +
+
+  geom_line(
+    linewidth = 1,
+    na.rm = TRUE
+  ) +
+
+  facet_wrap(
+    ~ state,
+    ncol = 2,
+    scales = "free_y"
+  ) +
+
+  scale_colour_manual(
+    values = c(
+      "Observed" = col_obs,
+      "Model-predicted" = col_pred
+    )
+  ) +
+
+  scale_linetype_manual(
+    values = c(
+      "Observed" = "solid",
+      "Model-predicted" = "dashed"
+    )
+  ) +
+
+  scale_x_continuous(
+    breaks = 0:7,
+    limits = c(0, 7),
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+
+  scale_y_continuous(
+    limits = c(0, NA),
+    expand = expansion(mult = c(0, 0.08))
+  ) +
+
+  labs(
+    x = NULL,
+    y = "Prevalence (%)"
+  ) +
+
+  theme_common
+
+
+# ============================================================
+# 8. RECENCY OF CAV ASCERTAINMENT
+# ============================================================
+
+p_recency <- ggplot(
+
+  recency_df,
+
+  aes(x = years)
+
+) +
+
+  # 10th-90th percentile interval
+
+  geom_ribbon(
+    aes(
+      ymin = q10,
+      ymax = q90
+    ),
+    fill = col_obs,
+    alpha = 0.20,
+    na.rm = TRUE
+  ) +
+
+  # Interquartile range
+
+  geom_ribbon(
+    aes(
+      ymin = q25,
+      ymax = q75
+    ),
+    fill = col_obs,
+    alpha = 0.55,
+    na.rm = TRUE
+  ) +
+
+  # Median
+
+  geom_line(
+    aes(y = median),
+    colour = "#405C5B",
+    linewidth = 0.9,
+    na.rm = TRUE
+  ) +
+
+  scale_x_continuous(
+    breaks = 0:7,
+    limits = c(0, 7),
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+
+  scale_y_continuous(
+    limits = c(0, NA),
+    expand = expansion(mult = c(0, 0.08))
+  ) +
+
+  labs(
+
+    title = "Recency of CAV ascertainment",
+
+    subtitle = "Median, IQR and 10th\u201390th percentiles",
+
+    x = NULL,
+
+    y = "Time since last\nassessment (years)"
+  ) +
+
+  theme_common +
+
+  theme(
+    legend.position = "none"
+  )
+
+
+# ============================================================
+# 9. PATIENTS WITHOUT CONCLUSIVE ASSESSMENT
+# ============================================================
+
+p_unassessed <- ggplot(
+
+  recency_df,
+
+  aes(
+    x = years,
+    y = pct_unassessed
+  )
+
+) +
+
+  geom_area(
+    fill = col_obs,
+    alpha = 0.25,
+    na.rm = TRUE
+  ) +
+
+  geom_line(
+    colour = "#405C5B",
+    linewidth = 0.9,
+    na.rm = TRUE
+  ) +
+
+  scale_x_continuous(
+    breaks = 0:7,
+    limits = c(0, 7),
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+
+  scale_y_continuous(
+    breaks = seq(0, 100, by = 25),
+    limits = c(0, 100),
+    expand = expansion(mult = c(0, 0.03))
+  ) +
+
+  labs(
+
+    title = "Absence of CAV ascertainment",
+
+    x = "Years since HTx",
+
+    y = "Patients without prior\nassessment (%)"
+  ) +
+
+  theme_common
+
+
+# ============================================================
+# 10. COMBINE FIGURES
+# ============================================================
+
+p_gof <- (
+
+  p_prev /
+
+  p_recency /
+
+  p_unassessed
+
+) +
+
+  plot_layout(
+    heights = c(3.2, 1.1, 1)
+  )
+
+p_gof
+
+
+# ============================================================
+# 11. EXPORT
+# ============================================================
+
+ggsave(
+
+  filename = "FYND_prevalence_GoF_constant.png",
+
+  plot = p_gof,
+
+  width = 10,
+
+  height = 10,
+
+  units = "in",
+
+  dpi = 400,
+
+  bg = "white"
 )
