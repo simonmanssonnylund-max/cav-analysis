@@ -1,0 +1,138 @@
+library(msm)
+
+# ============================================================
+# 1. CREATE LOCAL COPIES OF THE RELEVANT FUNCTIONS
+# ============================================================
+
+ns <- asNamespace("msm")
+
+patch_env <- new.env(parent = ns)
+
+expected_fixed <- get("expected.msm", envir = ns)
+observed_fixed <- get("observed.msm", envir = ns)
+covhist_fixed  <- get("get.covhist", envir = ns)
+
+prevalence_fixed <- msm::prevalence.msm
+
+
+# ============================================================
+# 2. HELPER FOR PATCHING SOURCE CODE
+# ============================================================
+
+replace_line <- function(fun, pattern, replacement) {
+
+  src <- deparse(body(fun), width.cutoff = 500L)
+
+  ind <- grep(pattern, src)
+
+  stopifnot(length(ind) == 1L)
+
+  src[ind] <- replacement
+
+  body(fun) <- parse(
+    text = paste(src, collapse = "\n")
+  )[[1]]
+
+  fun
+}
+
+
+# ============================================================
+# 3. FIX MISCLASSIFICATION COVARIATES
+# ============================================================
+
+expected_fixed <- replace_line(
+  fun = expected_fixed,
+
+  pattern = "^\\s*ecovs\\s*<-",
+
+  replacement = paste(
+    'ecovs <- ccovs[[findInterval(times[j], ctimes) + 1L]]',
+    '[attr(x$data$mf, "covnames.e")]',
+    sep = ""
+  )
+)
+
+
+# ============================================================
+# 4. FIX ALIGNMENT OF COVARIATE HISTORIES
+# ============================================================
+
+covhist_fixed <- replace_line(
+  fun = covhist_fixed,
+
+  pattern = "^\\s*change.times <- split\\(",
+
+  replacement = paste0(
+    "change.times <- split(",
+    "change.times[keep & !(first | last)], ",
+    "factor(subj[keep & !(first | last)], ",
+    "levels = unique(subj)))"
+  )
+)
+
+
+# ============================================================
+# 5. LINK THE LOCALLY CORRECTED FUNCTIONS
+# ============================================================
+
+environment(expected_fixed)   <- patch_env
+environment(observed_fixed)   <- patch_env
+environment(covhist_fixed)    <- patch_env
+environment(prevalence_fixed) <- patch_env
+
+patch_env$expected.msm <- expected_fixed
+patch_env$observed.msm <- observed_fixed
+patch_env$get.covhist  <- covhist_fixed
+
+
+# ============================================================
+# 6. CALCULATE OBSERVED AND EXPECTED PREVALENCES
+# ============================================================
+
+cut_time <- 45 / 365.25
+
+times <- sort(unique(c(
+  seq(0, 7, by = 0.1),
+  cut_time
+)))
+
+prev_constant <- prevalence_fixed(
+  fit_constant,
+  times      = times,
+  timezero   = 0,
+  covariates = "population",
+  interp     = "start",
+  ci         = "none"
+)
+
+
+# ============================================================
+# 7. INSPECT RESULTS
+# ============================================================
+
+prev_constant$Observed
+prev_constant$Expected
+
+prev_constant$`Observed percentages`
+prev_constant$`Expected percentages`
+
+
+# ============================================================
+# 8. NUMERICAL CHECKS
+# ============================================================
+
+# Observed and expected population sizes should agree
+
+all.equal(
+  unname(prev_constant$Observed[, "Total"]),
+  unname(prev_constant$Expected[, "Total"]),
+  tolerance = 1e-8
+)
+
+# Expected percentages should sum to 100
+
+range(
+  rowSums(prev_constant$`Expected percentages`),
+  na.rm = TRUE
+)
