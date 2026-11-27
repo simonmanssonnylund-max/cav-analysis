@@ -1,0 +1,47 @@
+# Copy the original function
+pearson_fixed <- msm::pearson.msm
+
+# Extract its source code
+src <- paste(
+  deparse(body(pearson_fixed)),
+  collapse = "\n"
+)
+
+# Fix 1: Preserve dimensions when extracting
+# misclassification covariates
+src <- gsub(
+  'dat\\[,\\s*attr\\(dat,\\s*"covnames\\.e"\\)\\s*\\]',
+  'dat[, attr(dat, "covnames.e"), drop = FALSE]',
+  src,
+  perl = TRUE
+)
+
+# Fix 2: Preserve dimensions and covariate names
+# when extracting unique covariate profiles
+src <- gsub(
+  "uniqmisc\\[i,\\s*\\]",
+  "uniqmisc[i, , drop = FALSE]",
+  src,
+  perl = TRUE
+)
+
+# Update the local function
+body(pearson_fixed) <- parse(text = src)[[1]]
+
+# Run the corrected function
+set.seed(123)
+
+gof_constant <- pearson_fixed(
+  fit_constant,
+  timegroups     = 2,
+  intervalgroups = 2,
+  covgroups      = 2,
+  N              = 100,
+  boot           = FALSE
+)
+
+# Results
+gof_constant$test
+gof_constant$Observed
+gof_constant$Expected
+gof_constant$Deviance
