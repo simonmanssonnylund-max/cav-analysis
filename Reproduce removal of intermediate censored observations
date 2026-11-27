@@ -1,0 +1,32 @@
+library(dplyr)
+
+cut_time <- 45 / 365.25
+
+dat_check <- model.frame(fit_constant) %>%
+  transmute(
+    lopnr = `(subject)`,
+    years = `(time)`,
+    state = `(state)`,
+    post_cut = post_cut
+  ) %>%
+  group_by(lopnr) %>%
+  arrange(years, .by_group = TRUE) %>%
+  filter(state != 99 | row_number() == n()) %>%
+  mutate(
+    prev_time = lag(years),
+    prev_state = lag(state),
+    prev_post_cut = lag(post_cut),
+    crosses_cut = prev_time < cut_time &
+                  years >= cut_time
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(prev_time))
+
+dat_check %>%
+  filter(prev_state == 1) %>%
+  group_by(prev_post_cut, post_cut, crosses_cut) %>%
+  summarise(
+    n_intervals = n(),
+    n_deaths = sum(state == 4),
+    .groups = "drop"
+  )
