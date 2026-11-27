@@ -1,37 +1,49 @@
 library(msm)
 
 # ============================================================
-# 1. CREATE LOCAL COPIES OF THE RELEVANT FUNCTIONS
+# 1. LOCAL COPIES OF THE ORIGINAL FUNCTIONS
 # ============================================================
 
 ns <- asNamespace("msm")
 
 patch_env <- new.env(parent = ns)
 
-expected_fixed <- get("expected.msm", envir = ns)
-observed_fixed <- get("observed.msm", envir = ns)
-covhist_fixed  <- get("get.covhist", envir = ns)
-
+expected_fixed   <- get("expected.msm", envir = ns)
+observed_fixed   <- get("observed.msm", envir = ns)
+covhist_fixed    <- get("get.covhist", envir = ns)
 prevalence_fixed <- msm::prevalence.msm
 
 
 # ============================================================
-# 2. HELPER FOR PATCHING SOURCE CODE
+# 2. HELPER FOR REPLACING COMPLETE EXPRESSIONS
 # ============================================================
 
-replace_line <- function(fun, pattern, replacement) {
+replace_expression <- function(fun, pattern, replacement) {
 
-  src <- deparse(body(fun), width.cutoff = 500L)
+  src <- paste(
+    deparse(body(fun), width.cutoff = 500L),
+    collapse = "\n"
+  )
 
-  ind <- grep(pattern, src)
-
-  stopifnot(length(ind) == 1L)
-
-  src[ind] <- replacement
-
-  body(fun) <- parse(
-    text = paste(src, collapse = "\n")
+  matches <- gregexpr(
+    pattern,
+    src,
+    perl = TRUE
   )[[1]]
+
+  stopifnot(
+    length(matches) == 1L,
+    matches[1] != -1L
+  )
+
+  src <- sub(
+    pattern,
+    replacement,
+    src,
+    perl = TRUE
+  )
+
+  body(fun) <- parse(text = src)[[1]]
 
   fun
 }
@@ -41,15 +53,20 @@ replace_line <- function(fun, pattern, replacement) {
 # 3. FIX MISCLASSIFICATION COVARIATES
 # ============================================================
 
-expected_fixed <- replace_line(
+expected_fixed <- replace_expression(
+
   fun = expected_fixed,
 
-  pattern = "^\\s*ecovs\\s*<-",
+  pattern = paste0(
+    "ecovs\\s*<-\\s*",
+    "if\\s*\\(length\\(ctimes\\)\\s*==\\s*0\\)",
+    "\\s*ccovs\\s*else\\s*",
+    "ccovs\\[\\[length\\(ccovs\\)\\]\\]"
+  ),
 
-  replacement = paste(
+  replacement = paste0(
     'ecovs <- ccovs[[findInterval(times[j], ctimes) + 1L]]',
-    '[attr(x$data$mf, "covnames.e")]',
-    sep = ""
+    '[attr(x$data$mf, "covnames.e")]'
   )
 )
 
@@ -58,22 +75,27 @@ expected_fixed <- replace_line(
 # 4. FIX ALIGNMENT OF COVARIATE HISTORIES
 # ============================================================
 
-covhist_fixed <- replace_line(
+covhist_fixed <- replace_expression(
+
   fun = covhist_fixed,
 
-  pattern = "^\\s*change.times <- split\\(",
+  pattern = paste0(
+    "change\\.times\\s*<-\\s*split\\(",
+    "[^\\n]+"
+  ),
 
   replacement = paste0(
     "change.times <- split(",
     "change.times[keep & !(first | last)], ",
     "factor(subj[keep & !(first | last)], ",
-    "levels = unique(subj)))"
+    "levels = unique(subj)), ",
+    "drop = FALSE)"
   )
 )
 
 
 # ============================================================
-# 5. LINK THE LOCALLY CORRECTED FUNCTIONS
+# 5. LINK CORRECTED FUNCTIONS
 # ============================================================
 
 environment(expected_fixed)   <- patch_env
@@ -87,7 +109,19 @@ patch_env$get.covhist  <- covhist_fixed
 
 
 # ============================================================
-# 6. CALCULATE OBSERVED AND EXPECTED PREVALENCES
+# 6. CHECK COVARIATE HISTORIES
+# ============================================================
+
+ch <- covhist_fixed(fit_constant)
+
+stopifnot(
+  length(ch$hist) ==
+    length(unique(fit_constant$data$mf[["(subject)"]]))
+)
+
+
+# ============================================================
+# 7. CALCULATE PREVALENCES
 # ============================================================
 
 cut_time <- 45 / 365.25
@@ -108,7 +142,7 @@ prev_constant <- prevalence_fixed(
 
 
 # ============================================================
-# 7. INSPECT RESULTS
+# 8. RESULTS
 # ============================================================
 
 prev_constant$Observed
@@ -119,18 +153,14 @@ prev_constant$`Expected percentages`
 
 
 # ============================================================
-# 8. NUMERICAL CHECKS
+# 9. NUMERICAL CHECKS
 # ============================================================
-
-# Observed and expected population sizes should agree
 
 all.equal(
   unname(prev_constant$Observed[, "Total"]),
   unname(prev_constant$Expected[, "Total"]),
   tolerance = 1e-8
 )
-
-# Expected percentages should sum to 100
 
 range(
   rowSums(prev_constant$`Expected percentages`),
